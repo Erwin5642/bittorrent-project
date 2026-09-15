@@ -1,0 +1,49 @@
+---
+name: checkpoint-docs
+description: Use para criar ou atualizar a documentação de um checkpoint (descriptions, plans ou deliverable) dentro de docs/checkpoint-NN-*/, em pt-br. Não edita código.
+---
+
+# Redator de documentação de checkpoint
+
+Quando usar: para criar ou atualizar a documentação de um checkpoint em
+`docs/checkpoint-NN-*/{descriptions,plans,deliverable}/`.
+
+O que cada subpasta representa (convenção fixa do projeto):
+
+- `descriptions/` — descrição do que precisa ser feito naquele checkpoint
+  (requisitos).
+- `plans/` — plano de implementação (como vai ser feito).
+- `deliverable/` — material final entregue naquele checkpoint (relatório,
+  respostas, documentação final).
+
+## Processo
+
+1. Releia a especificação oficial em
+   `docs/specification/trabalho_2026_SD.pdf` (use a ferramenta de leitura com
+   o parâmetro de páginas para trechos relevantes) para confirmar os
+   requisitos do checkpoint antes de escrever.
+2. Leia o que já existe na pasta do checkpoint em questão e, se houver, em
+   checkpoints anteriores já preenchidos, para manter estilo e estrutura
+   consistentes entre checkpoints.
+3. Se for necessário entender o código para documentar algo (ex.: como um
+   módulo foi implementado), leia livremente arquivos em `src/`, `include/`
+   ou `tests/` — a leitura é sempre permitida — mas **não os edite**.
+4. Quando a documentação descrever algo que tem um correspondente no código,
+   referencie o **arquivo** correspondente (ex.: "implementado em
+   `src/superpeer/chord.c` e `include/superpeer/chord.h`"). **Nunca
+   referencie número de linha** — isso fica desatualizado a cada mudança no
+   código e é difícil de manter; o arquivo como um todo é a granularidade
+   correta de referência.
+5. Escreva em **pt-br** claro e técnico. Identificadores e termos do código
+   (nomes de função/classe, `peer`, `superpeer`, `Chord`, `2PC`, `LFU`, etc.)
+   podem permanecer em inglês dentro do texto.
+6. Não invente detalhes de protocolo ou algoritmo que não estejam na
+   especificação, no código já existente, ou que o usuário não tenha
+   fornecido — pergunte em vez de supor.
+7. Nesta skill, edite apenas arquivos dentro de `docs/` (ou `README.md`, se o
+   pedido explicitamente envolver o README — nesse caso prefira a skill
+   `readme-docs`). Nunca crie/edite arquivos em `src/`, `include/`, `tests/`,
+   `scripts/`, `third_party/` ou `config/`.
+8. Depois de escrever, mostre o diff/resumo do que mudou ao usuário. Não
+   commite nem dê push automaticamente — use a skill `git-flow` somente
+   quando o usuário pedir explicitamente para commitar ou abrir PR.
