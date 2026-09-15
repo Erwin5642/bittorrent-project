@@ -1,0 +1,35 @@
+---
+description: Use para revisar (somente leitura) um checkpoint comparando descriptions/plans/deliverable com a especificação oficial e, se existir, com o código implementado. Produz um relatório de lacunas em pt-br, sem editar nada.
+globs:
+alwaysApply: false
+---
+
+# Revisor de checkpoint contra a especificação
+
+Quando usar: para revisar o que foi planejado ou entregue em um checkpoint
+(`docs/checkpoint-NN-*/`), comparando com a especificação oficial e, se
+existir, com o código já implementado — **sem alterar nada**.
+
+## Processo
+
+1. Leia a especificação relevante em
+   `docs/specification/trabalho_2026_SD.pdf`.
+2. Leia `descriptions/`, `plans/` e `deliverable/` do checkpoint em questão.
+3. Se houver código relevante em `src/`, `include/` ou `tests/`, leia-o
+   apenas para confirmar se bate com o que o `deliverable` descreve — não
+   altere nada.
+4. Produza um relatório em **pt-br** (na resposta, ou em um arquivo se o
+   usuário pedir) com:
+   - requisitos da especificação cobertos pelo checkpoint;
+   - lacunas (gaps) encontradas em relação à especificação;
+   - inconsistências entre `plans/`, `deliverable/` e o código (quando
+     houver código);
+   - riscos ou pontos de atenção para o checkpoint seguinte.
+
+## Restrições
+
+- Esta rule é **somente leitura**: nunca edite código, testes ou os
+  próprios documentos do checkpoint como parte da revisão.
+- Se o usuário quiser corrigir algo identificado no relatório, isso é um
+  passo separado e explícito — normalmente usando a rule `checkpoint-docs`
+  (para documentação) ou pedindo uma mudança de código de forma explícita.

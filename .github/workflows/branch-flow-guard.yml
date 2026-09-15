@@ -1,0 +1,51 @@
+name: Guarda do fluxo de branches
+
+# Reforça o modelo de branches definido em .claude/skills/git-flow/SKILL.md:
+# - PR para `master` só pode vir de `dev` (release de checkpoint).
+# - PR para `dev` só pode vir de uma branch de tarefa `<tipo>/<slug-curto>`,
+#   com <tipo> do vocabulário do Conventional Commits.
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  check-branch-flow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validar base/head da PR
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          echo "Base: $BASE_REF"
+          echo "Head: $HEAD_REF"
+
+          TASK_BRANCH_REGEX='^(docs|feat|fix|chore|test|refactor)/[a-z0-9]+(-[a-z0-9]+)*$'
+
+          if [ "$BASE_REF" = "master" ]; then
+            if [ "$HEAD_REF" != "dev" ]; then
+              echo "::error::PRs para 'master' só podem vir de 'dev' (release de checkpoint)."
+              echo "::error::Esta PR tenta ir de '$HEAD_REF' direto para 'master', o que não é permitido pelo fluxo de git do projeto (ver a skill git-flow)."
+              exit 1
+            fi
+            echo "OK: PR de release dev -> master."
+            exit 0
+          fi
+
+          if [ "$BASE_REF" = "dev" ]; then
+            if ! echo "$HEAD_REF" | grep -qE "$TASK_BRANCH_REGEX"; then
+              echo "::error::Nome de branch inválido: '$HEAD_REF'."
+              echo "::error::Branches de tarefa devem seguir o padrão <tipo>/<slug-curto>, com tipo em docs, feat, fix, chore, test ou refactor (ver a skill git-flow). Exemplo: docs/plano-checkpoint-03."
+              exit 1
+            fi
+            echo "OK: branch de tarefa '$HEAD_REF' segue o padrão esperado."
+            exit 0
+          fi
+
+          echo "Base '$BASE_REF' não é 'dev' nem 'master' — fora do escopo desta checagem."

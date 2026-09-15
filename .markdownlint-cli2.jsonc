@@ -1,0 +1,12 @@
+{
+  // Config do markdownlint-cli2 para o repositório. Mantém as regras
+  // default, exceto:
+  // - MD013 (comprimento de linha): desligada porque a documentação dos
+  //   checkpoints (descriptions/plans/deliverable) é prosa em pt-br, não
+  //   código, e parágrafos longos em uma linha só são normais.
+  "config": {
+    "default": true,
+    "MD013": false
+  },
+  "ignores": ["third_party/**"]
+}

@@ -1,0 +1,45 @@
+name: Build C (condicional)
+
+# Compila o projeto se houver um Makefile ou CMakeLists.txt na raiz. Ainda
+# não existe nenhum dos dois no repositório, então por enquanto este job
+# só avisa e passa — assim que o time adicionar o build real (natural já
+# no checkpoint 1, já que peer/superpeer vão precisar disso localmente),
+# o build passa a ser checado de verdade sem precisar mexer neste arquivo.
+#
+# Quando o time decidir entre vendorizar LZ4/SHA-256 em third_party/ ou usar
+# bibliotecas do sistema (apt-get install), pode ser necessário um passo
+# extra aqui para instalar dependências antes do build — isso ainda não
+# está definido pela especificação, então não foi adivinhado.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "include/**"
+      - "third_party/**"
+      - "Makefile"
+      - "CMakeLists.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compilar (se houver Makefile/CMakeLists)
+        run: |
+          set -euo pipefail
+
+          if [ -f Makefile ]; then
+            echo "Makefile encontrado, rodando 'make'."
+            make
+          elif [ -f CMakeLists.txt ]; then
+            echo "CMakeLists.txt encontrado, rodando cmake + build."
+            cmake -B build
+            cmake --build build
+          else
+            echo "Nenhum Makefile/CMakeLists encontrado ainda — build check pulado."
+          fi
