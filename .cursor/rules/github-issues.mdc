@@ -1,0 +1,62 @@
+---
+description: Use para abrir issues padronizadas no GitHub (gh issue create) neste repositório — título, labels e corpo em pt-br com critérios de aceite.
+globs:
+alwaysApply: false
+---
+
+# Abertura de issues padronizadas
+
+Quando usar: ao criar uma issue no GitHub para este repositório (tarefa,
+bug, lacuna de documentação, follow-up de checkpoint).
+
+## Título
+
+- Formato: `tipo: resumo curto`, com `tipo` do vocabulário do Conventional
+  Commits (o mesmo usado pela rule `git-flow`): `docs`, `feat`, `fix`,
+  `chore`, `test`, `refactor`. O resumo pode ser em pt-br.
+- Exemplos: `docs: escrever plano do checkpoint-04`, `fix: lookup do Chord
+  não trata anel com um único nó`.
+
+## Labels
+
+- Confira as labels existentes com `gh label list` antes de assumir.
+  Mapeamento sugerido entre tipo e labels padrão do GitHub:
+  `feat`→`enhancement`, `fix`→`bug`, `docs`→`documentation`.
+- **Não crie labels novas** nem altere a configuração de labels do
+  repositório sem o usuário pedir isso explicitamente — é uma mudança que
+  afeta o repositório todo, não só esta issue.
+- Se o tipo não tiver uma label equivalente (ex.: `chore`, `test`,
+  `refactor`), é melhor deixar a issue sem label do que inventar uma.
+
+## Corpo (pt-br)
+
+Use este template:
+
+```
+## Contexto
+<por que essa issue existe>
+
+## Checkpoint relacionado
+<docs/checkpoint-NN-*/ ou "nenhum">
+
+## Critérios de aceite
+- [ ] ...
+- [ ] ...
+
+## Referências
+<arquivos relevantes por caminho, ex. `src/superpeer/chord.c`>
+```
+
+- Arquivos, não linhas: ao referenciar código ou documentação relevante,
+  cite o caminho do arquivo, nunca número de linha — fica desatualizado a
+  cada mudança no código (mesma regra da rule `checkpoint-docs`).
+- Não invente critérios de aceite que o usuário não forneceu e que não
+  estejam na especificação (`docs/specification/trabalho_2026_SD.pdf`) —
+  pergunte em vez de supor.
+
+## Antes de criar
+
+- Mostre o título, as labels e o corpo propostos ao usuário.
+- Só rode `gh issue create` depois de confirmação explícita nesta conversa —
+  abrir uma issue é visível para o time/curso e não é uma ação trivialmente
+  reversível (pode ser fechada, mas o histórico permanece).

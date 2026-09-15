@@ -1,0 +1,65 @@
+# Contexto do projeto
+
+Este repositório é o trabalho da disciplina de Sistemas Distribuídos (SD, 2026):
+implementação de uma rede P2P no estilo BitTorrent, com papéis de `peer` e
+`superpeer`, organizada em checkpoints incrementais (`docs/checkpoint-01-network`
+até `docs/checkpoint-06-integration`). A especificação oficial está em
+`docs/specification/trabalho_2026_SD.pdf` — é a fonte de verdade para requisitos.
+
+Cada pasta de checkpoint tem três subpastas com papéis fixos:
+
+- `descriptions/` — o que precisa ser feito naquele checkpoint (requisitos).
+- `plans/` — como será implementado (plano).
+- `deliverable/` — o material final entregue naquele checkpoint.
+
+## Convenção de idioma
+
+- Código (`src/`, `include/`, `tests/`, `scripts/`, identificadores, nomes de
+  função/classe/protocolo) fica em **inglês**, como já está no repositório.
+- Comentários de código e **toda documentação** (`docs/`, `README.md`) ficam em
+  **pt-br**. Termos técnicos do código (ex.: `peer`, `superpeer`, `Chord`, `2PC`,
+  `LFU`, nomes de função) podem permanecer em inglês dentro do texto em pt-br.
+
+## Regra de ouro: código é somente leitura por padrão
+
+O foco esperado do agente neste repositório é **documentação e fluxo de git**,
+não desenvolvimento de código. Portanto:
+
+- Ler qualquer arquivo de código (`src/`, `include/`, `tests/`, `scripts/`,
+  `third_party/`, `config/`) é sempre permitido e encorajado, para
+  contextualizar documentação ou revisões.
+- **Nunca crie, edite ou apague arquivos dentro de `src/`, `include/`, `tests/`,
+  `scripts/`, `third_party/` ou `config/`** a menos que o pedido do usuário
+  **na mensagem atual** peça explicitamente uma mudança de código. Uma
+  autorização dada em uma tarefa anterior não vale para tarefas futuras.
+- Se, no meio de uma tarefa de documentação, parecer necessário tocar em código
+  (ex.: corrigir algo que a documentação revelou), pare e pergunte antes de
+  editar — não assuma.
+
+## Git
+
+- Modelo de branches: `master` é a branch de **release** (contém a
+  implementação/documentação final já fechada de cada checkpoint) e só
+  recebe merge de `dev`, via PR. `dev` é a branch de **integração** — toda
+  branch de tarefa nasce de `dev` e volta para `dev` via PR. Nunca abra PR de
+  uma branch de tarefa direto para `master`.
+- Nunca commite ou faça push sem o usuário pedir explicitamente nesta
+  conversa, mesmo ao seguir uma das skills abaixo.
+- Ver a skill `git-flow` para o detalhamento completo da convenção de
+  branches, commits e PRs deste projeto (branches por tarefa, não por
+  checkpoint).
+
+## Skills disponíveis
+
+- `checkpoint-docs` — redigir/atualizar descriptions, plans ou deliverable de
+  um checkpoint.
+- `checkpoint-review` — revisar (somente leitura) um checkpoint contra a
+  especificação oficial e reportar lacunas.
+- `readme-docs` — manter o `README.md` e docs de visão geral sincronizados com
+  o estado real do projeto.
+- `git-flow` — convenção de branch/commit/PR para tarefas neste repositório.
+- `github-issues` — abertura padronizada de issues (título, labels, corpo).
+- `github-prs` — abertura padronizada de PRs (título, corpo, vínculo com
+  issue); usa `git-flow` para saber qual branch/base usar.
+
+Estas mesmas skills existem em `.cursor/rules/` para uso no Cursor.

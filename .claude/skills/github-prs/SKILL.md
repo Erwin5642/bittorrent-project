@@ -1,0 +1,64 @@
+---
+name: github-prs
+description: Use para abrir Pull Requests padronizados no GitHub (gh pr create) neste repositório — título, corpo em pt-br e vínculo com issue. Para saber qual branch usar e qual é a base do PR, ver a skill git-flow primeiro.
+---
+
+# Abertura de PRs padronizados
+
+Quando usar: ao abrir um Pull Request no GitHub para este repositório.
+
+Pré-requisito: **ver a skill `git-flow` primeiro.** Ela define em qual
+branch a mudança precisa estar (sempre uma branch de tarefa dedicada, nunca
+commit direto em `dev`/`master` — e, se não estiver, criar a branch antes de
+seguir) e qual é a branch base do PR (`dev` para o caso normal, `master`
+apenas no PR de release vindo de `dev`). Esta skill cobre só o conteúdo do
+título e do corpo do PR.
+
+## Título
+
+- Mesmo formato usado para branch/commit: `tipo(escopo opcional): resumo`,
+  vocabulário do Conventional Commits (`docs`, `feat`, `fix`, `chore`,
+  `test`, `refactor`). O resumo pode ser em pt-br.
+- PR de release (`dev` → `master`): `release: checkpoint-0N - <resumo>`
+  (formato já definido na skill `git-flow`).
+
+## Corpo (pt-br)
+
+Use este template:
+
+```
+## O quê e por quê
+<resumo da mudança e motivação>
+
+## Mudanças
+- ...
+- ...
+
+## Checkpoint relacionado
+<docs/checkpoint-NN-*/ ou "nenhum">
+
+## Issue relacionada
+Closes #<numero>
+<!-- use "Refs #<numero>" se não for para fechar a issue automaticamente -->
+<!-- remova esta seção se não houver issue -->
+
+## Checklist
+- [ ] Documentação revisada
+- [ ] Nenhum arquivo de código alterado fora do que foi pedido explicitamente
+- [ ] Branch criada a partir de `dev` (ou PR de release `dev` → `master`)
+```
+
+- Arquivos, não linhas: ao listar "Mudanças", cite o caminho do arquivo,
+  nunca número de linha — fica desatualizado a cada mudança no código (mesma
+  regra da skill `checkpoint-docs`).
+- Vincule a issue relacionada quando houver uma (`Closes #<numero>`). Não
+  invente um número de issue — confirme com o usuário ou rode
+  `gh issue list` para achar a issue certa.
+
+## Antes de abrir
+
+- Mostre o título e o corpo propostos ao usuário.
+- Não rode `gh pr create` sem o usuário pedir isso explicitamente nesta
+  conversa (mesma regra da skill `git-flow`).
+- Se a mudança ainda não estiver numa branch de tarefa dedicada, resolva
+  isso primeiro seguindo a skill `git-flow` antes de montar o PR.
