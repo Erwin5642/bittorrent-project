@@ -39,7 +39,7 @@ O grupo só avança quando o checkpoint atual está funcionando. Cada checkpoint
 
 ## Estrutura do repositório
 
-```
+```text
 .
 ├── config/                 Arquivos .conf dos nós (IP, porta, tipo, Super Peers de bootstrap)
 ├── data/                   Saída em tempo de execução (não é código-fonte)

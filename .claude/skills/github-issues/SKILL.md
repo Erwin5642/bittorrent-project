@@ -31,7 +31,7 @@ bug, lacuna de documentação, follow-up de checkpoint).
 
 Use este template:
 
-```
+```markdown
 ## Contexto
 <por que essa issue existe>
 
