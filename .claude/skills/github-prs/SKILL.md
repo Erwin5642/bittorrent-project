@@ -26,7 +26,7 @@ título e do corpo do PR.
 
 Use este template:
 
-```
+```markdown
 ## O quê e por quê
 <resumo da mudança e motivação>
 
