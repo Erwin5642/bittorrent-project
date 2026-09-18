@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <time.h>
 #include <zconf.h>
 #include <zlib.h>
 
@@ -24,10 +25,11 @@ static uint64_t my_ntohll(uint64_t val) {
 
 static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[JOIN] = 39,
+	[PING] = 0,
+	[PONG] = 0,
 	[LEAVE] = 32,
 	[ERROR] = 68,
 	[ACK] = 32,
-
 };
 //TEMP
 static const char *const type_names[MSG_TYPE_MAX] = {
@@ -40,7 +42,7 @@ static const char *const type_names[MSG_TYPE_MAX] = {
 };
 
 const char *message_type_name(uint16_t t) {
-    if (t == 0 || t >= MSG_TYPE_MAX || !type_names[t])
+    if (t >= MSG_TYPE_MAX || !type_names[t])
         return "UNKNOWN";
     return type_names[t];
 }
@@ -138,6 +140,16 @@ int unpack_error(error_t* out_st, const char* in_msg){
 	return 0;
 }
 
+int pack_leave(const leave_t* in_st, char* out_msg){
+	memcpy(out_msg, in_st->node_id, sizeof(uint8_t)*32);
+	return 0;
+}
+
+int unpack_leave(leave_t* out_st, const char* in_msg){
+	memcpy(out_st->node_id, in_msg, sizeof(uint8_t)*32);
+	return 0;
+}
+
 int unpack_header(pl_header* out_st, const char* in_msg){
 	const char* pt = in_msg;
 	uint16_t temp_16;
@@ -231,6 +243,13 @@ int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl
 				pack_join(msg_payload, buffer_pointer);
 				break;
 			}
+			case PING:
+			case PONG:
+				break;
+			case LEAVE: {
+				pack_leave(msg_payload, buffer_pointer);
+				break;
+			}
 			case ACK: {
 				pack_ack(msg_payload, buffer_pointer); 
 				break;
@@ -263,7 +282,11 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 	pl_header msg_header;
 
 	unpack_header(&msg_header, header_buffer);
-	
+
+	if (msg_header.protocol_ver != PROTOCOL_VER) {
+		return (msg_t){msg_header, NULL, NET_ERROR};
+	}
+
 	uint32_t payload_size = msg_header.pl_size;
 	uint16_t message_type = msg_header.msg_type;
 
@@ -287,6 +310,15 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 				join_t new_st;
 				unpack_join(&new_st, in_msg_buffer);
 				memcpy(struct_payload, &new_st, sizeof(join_t));
+				break;
+			}
+			case PING:
+			case PONG:
+				break;
+			case LEAVE: {
+				leave_t new_st;
+				unpack_leave(&new_st, in_msg_buffer);
+				memcpy(struct_payload, &new_st, sizeof(leave_t));
 				break;
 			}
 			case ACK: {
@@ -379,5 +411,48 @@ msg_t simple_recv(int fd, char* payload, uint32_t str_size){
 	if(msg_header.checksum != (uint32_t)crc)
 		return (msg_t){msg_header, payload, NET_ERROR};
 	return (msg_t){msg_header, payload, NET_OK}; 
+}
+
+void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *self, uint16_t msg_type,
+                       uint32_t pl_size) {
+	if (!out || !in || !self) {
+		return;
+	}
+	memset(out, 0, sizeof *out);
+	out->protocol_ver = PROTOCOL_VER;
+	out->msg_type = msg_type;
+	memcpy(out->src_node, self->bytes, NODE_ID_SIZE);
+	memcpy(out->dst_node, in->src_node, NODE_ID_SIZE);
+	memcpy(out->trsc_id, in->trsc_id, 16);
+	out->time = (uint64_t)time(NULL);
+	out->pl_size = pl_size;
+}
+
+int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *ack) {
+	char buf[HEADER_SIZE + 32];
+	pl_header hdr;
+
+	if (!req || !self || !ack) {
+		return NET_ERROR;
+	}
+	fill_reply_header(&hdr, req, self, ACK, 32);
+	return send_message(fd, buf, ack, &hdr);
+}
+
+int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason) {
+	char buf[HEADER_SIZE + 68];
+	pl_header hdr;
+	error_t err;
+
+	if (!req || !self) {
+		return NET_ERROR;
+	}
+	memset(&err, 0, sizeof err);
+	err.code = code;
+	if (reason) {
+		strncpy((char *)err.reason, reason, sizeof err.reason - 1);
+	}
+	fill_reply_header(&hdr, req, self, ERROR, 68);
+	return send_message(fd, buf, &err, &hdr);
 }
 

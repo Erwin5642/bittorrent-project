@@ -62,7 +62,7 @@ static void test_load_superpeer_with_bootstrap(void) {
   expect(node_config_load(TEST_CONF_PATH, &cfg) == 1, "load superpeer sucede");
   expect(cfg.ipv4 == ipv4_from_str("127.0.0.1"), "ip anunciado");
   expect(cfg.port == 8080, "porta 8080");
-  expect(cfg.node_type == superpeer, "type superpeer");
+  expect(cfg.node_type == SUPERPEER, "type superpeer");
   expect(cfg.bootstrap_count == 1, "um bootstrap");
   expect(cfg.bootstrap[0].ipv4 == ipv4_from_str("192.168.0.1"), "bootstrap ip");
   expect(cfg.bootstrap[0].port == 9000, "bootstrap porta");
@@ -80,7 +80,7 @@ static void test_load_peer_without_bootstrap(void) {
                          "type=peer\n"),
          "escreve conf peer");
   expect(node_config_load(TEST_CONF_PATH, &cfg) == 1, "load peer sucede");
-  expect(cfg.node_type == peer, "type peer");
+  expect(cfg.node_type == PEER, "type peer");
   expect(cfg.port == 7000, "porta 7000");
   expect(cfg.bootstrap_count == 0, "sem bootstrap");
   unlink(TEST_CONF_PATH);

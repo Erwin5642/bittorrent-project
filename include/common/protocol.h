@@ -1,16 +1,25 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
+#include "node.h"
+
 #include <stdint.h>
 
-#define HEADER_SIZE 99 
+/**
+ * @file protocol.h
+ * @brief Framing TCP, header padrão e payloads de controle (JOIN/PING/PONG/LEAVE/ACK/ERROR).
+ */
+
+#define HEADER_SIZE 99
 #define MAX_CONTROL_PAYLOAD_SZ 4096
+/** Versão do framing no primeiro byte do header (`!BH` no fio). */
+#define PROTOCOL_VER 1
 
 enum message_type{
-	PING,
-	PONG,
-	JOIN,
-	LEAVE,
+	JOIN = 0,
+	PING = 1,
+	PONG = 2,
+	LEAVE = 3,
 	LOOKUP,
 	STORE,
 	DOWNLOAD_REQ,
@@ -33,11 +42,6 @@ enum message_type{
 typedef enum compression_type{
 	LZ4,
 }compress_type;
-
-typedef enum node_type{
-	PEER,
-	SUPERPEER,
-}node_type;
 
 typedef enum metadata_status{
 	ACTIVE,
@@ -93,6 +97,13 @@ typedef struct joinPayload{
 	uint8_t node_type;
 }join_t;
 
+/**
+ * @brief Payload de LEAVE: NodeID de quem sai (32 bytes).
+ */
+typedef struct leavePayload{
+	uint8_t node_id[32];
+}leave_t;
+
 typedef struct ackPayload{
 	uint8_t node_id[32];
 }ack_t;
@@ -116,5 +127,36 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload);
 int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header);
 msg_t simple_recv(int fd, char* payload, uint32_t str_size);
 
+/**
+ * @brief Monta um header de resposta: ecoa TransactionID, troca src/dst.
+ * @param out Header de destino; o caller aloca.
+ * @param in Header da mensagem recebida.
+ * @param self NodeID de quem responde (vira @c src_node).
+ * @param msg_type Tipo da resposta (`ACK`, `ERROR`, …).
+ * @param pl_size Tamanho do payload em bytes.
+ */
+void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *self, uint16_t msg_type,
+                       uint32_t pl_size);
+
+/**
+ * @brief Envia um ACK ecoando o TransactionID de @p req.
+ * @param fd Socket conectado.
+ * @param req Header da mensagem original.
+ * @param self NodeID de quem responde.
+ * @param ack Payload com o NodeID confirmado.
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *ack);
+
+/**
+ * @brief Envia um ERROR ecoando o TransactionID de @p req.
+ * @param fd Socket conectado.
+ * @param req Header da mensagem original.
+ * @param self NodeID de quem responde.
+ * @param code Código CP1 (`1` malformado, `2` tabela cheia, `3` não suportado, `4` tipo inválido).
+ * @param reason Texto UTF-8 (até 63 chars + NUL); pode ser NULL.
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason);
 
 #endif
