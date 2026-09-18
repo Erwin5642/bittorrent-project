@@ -16,6 +16,9 @@
 /** Capacidade da tabela de membros em memória (sem persistência). */
 #define MEMBER_TABLE_MAX_SIZE 256
 
+/** Tamanho do nome lógico do nó (CLI `--name`), incluindo o NUL. */
+#define SUPERPEER_NAME_MAX 64
+
 /**
  * @brief Estado de um membro na tabela local.
  */
@@ -51,10 +54,11 @@ typedef struct {
  * @brief Estado do processo Super Peer.
  */
 typedef struct {
-  node_config_t cfg;       /**< Configuração lida do .conf. */
-  node_id_t self_id;       /**< NodeID deste Super Peer. */
-  member_table_t members;  /**< Membership local. */
-  int listend_fd;          /**< fd de `net_listen`, ou -1. */
+  node_config_t cfg;                 /**< Configuração lida do .conf. */
+  node_id_t self_id;                 /**< NodeID deste Super Peer. */
+  member_table_t members;            /**< Membership local. */
+  int listend_fd;                    /**< fd de `net_listen`, ou -1. */
+  char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
 } superpeer_t;
 
 /**
@@ -99,11 +103,13 @@ void member_table_print(const member_table_t *table);
  * @brief Carrega o .conf, gera o NodeID, imprime a identidade e abre o listen.
  * @param sp Estado do Super Peer; o caller aloca.
  * @param conf_path Caminho do arquivo (ex.: `config/sp1.conf`).
+ * @param port Porta de listen; `0` usa a porta do .conf. Também entra no NodeID.
+ * @param name Nome lógico para logs (`Node <name> started`); NULL vira `"superpeer"`.
  * @return 1 em sucesso, 0 se config, identidade, tabela ou bind falhar.
- * @note Inclui o próprio nó como @c MEMBER_ALIVE. O bind usa a porta do .conf
- *       em todas as interfaces; o `ip` da config só entra no NodeID.
+ * @note Inclui o próprio nó como @c MEMBER_ALIVE. O bind usa @p port (ou a do
+ *       .conf) em todas as interfaces; o `ip` da config só entra no NodeID.
  */
-int superpeer_init(superpeer_t *sp, const char *conf_path);
+int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const char *name);
 
 /**
  * @brief Valida um JOIN e preenche ACK ou ERROR.
@@ -117,10 +123,21 @@ int superpeer_init(superpeer_t *sp, const char *conf_path);
 int superpeer_handle_join(superpeer_t *sp, const pl_header *hdr, const join_t *join, ack_t *ack, error_t *err);
 
 /**
- * @brief Loop de `net_accept` + `recv_message`. JOIN vai para @c superpeer_handle_join.
+ * @brief Processa LEAVE: marca o membro como @c MEMBER_REMOVED (se existir) e preenche ACK.
+ * @param sp Estado do Super Peer.
+ * @param hdr Header da mensagem recebida.
+ * @param leave Payload já unpackado.
+ * @param ack Preenchido com o NodeID de quem saiu.
+ * @return 1 para responder ACK (sempre, se os ponteiros forem válidos).
+ */
+int superpeer_handle_leave(superpeer_t *sp, const pl_header *hdr, const leave_t *leave, ack_t *ack);
+
+/**
+ * @brief Loop de `net_accept` + `recv_message`.
  * @param sp Super Peer já inicializado (`listend_fd` válido).
  * @return 0 se @p sp ou o listen fd for inválido. Não retorna no caminho feliz.
- * @note CRC inválido ou @c NET_CLOSED: fecha o fd e segue. Outros `msg_type`: ERROR código 3.
+ * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK.
+ *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder. Outros tipos: ERROR 3.
  */
 int superpeer_run(superpeer_t *sp);
 

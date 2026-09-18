@@ -90,7 +90,7 @@ void member_table_print(const member_table_t *table) {
   }
 }
 
-int superpeer_init(superpeer_t *sp, const char *conf_path) {
+int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const char *name) {
   node_config_t cfg;
   node_uuid_t uuid;
   member_t self;
@@ -114,6 +114,15 @@ int superpeer_init(superpeer_t *sp, const char *conf_path) {
     return 0;
   }
 
+  if (port != 0) {
+    cfg.port = port;
+  }
+  if (name && name[0]) {
+    strncpy(sp->name, name, sizeof sp->name - 1);
+  } else {
+    strncpy(sp->name, "superpeer", sizeof sp->name - 1);
+  }
+
   sp->cfg = cfg;
 
   if (!node_uuid_random(&uuid) || !node_id_generate(cfg.ipv4, cfg.port, &uuid, &sp->self_id)) {
@@ -125,7 +134,9 @@ int superpeer_init(superpeer_t *sp, const char *conf_path) {
       !node_id_to_hex(&sp->self_id, hex, sizeof hex)) {
     return 0;
   }
-  printf("SUPERPEER %s %u %s\n", ip, (unsigned)cfg.port, hex);
+  printf("Node %s started\n", sp->name);
+  printf("NodeID: %s\n", hex);
+  fflush(stdout);
 
   member_table_init(&sp->members);
   self.id = sp->self_id;
@@ -214,6 +225,39 @@ int superpeer_handle_join(superpeer_t *sp, const pl_header *hdr, const join_t *j
   return 1;
 }
 
+int superpeer_handle_leave(superpeer_t *sp, const pl_header *hdr, const leave_t *leave, ack_t *ack) {
+  node_id_t nid;
+  size_t i;
+
+  if (!sp || !hdr || !leave || !ack) {
+    return 0;
+  }
+  (void)hdr;
+
+  memset(ack, 0, sizeof *ack);
+  memcpy(nid.bytes, leave->node_id, NODE_ID_SIZE);
+  memcpy(ack->node_id, leave->node_id, NODE_ID_SIZE);
+
+  for (i = 0; i < sp->members.count; i++) {
+    if (node_id_cmp(&sp->members.entries[i].id, &nid) == 0) {
+      sp->members.entries[i].state = MEMBER_REMOVED;
+      break;
+    }
+  }
+  return 1;
+}
+
+static int send_pong(int fd, const pl_header *req, const node_id_t *self) {
+  char buf[HEADER_SIZE];
+  pl_header hdr;
+
+  if (!req || !self) {
+    return NET_ERROR;
+  }
+  fill_reply_header(&hdr, req, self, PONG, 0);
+  return send_message(fd, buf, NULL, &hdr);
+}
+
 int superpeer_run(superpeer_t *sp) {
   if (!sp || sp->listend_fd < 0) {
     return 0;
@@ -223,7 +267,10 @@ int superpeer_run(superpeer_t *sp) {
     struct sockaddr_in peer_addr;
     int conn;
     char in_buf[MAX_CONTROL_PAYLOAD_SZ];
-    join_t join;
+    union {
+      join_t join;
+      leave_t leave;
+    } payload;
     msg_t msg;
 
     memset(&peer_addr, 0, sizeof(peer_addr));
@@ -232,27 +279,31 @@ int superpeer_run(superpeer_t *sp) {
       continue;
     }
 
-    memset(&join, 0, sizeof join);
-    msg = recv_message(conn, in_buf, &join);
+    memset(&payload, 0, sizeof payload);
+    msg = recv_message(conn, in_buf, &payload);
     if (msg.status != NET_OK) {
       net_close(conn);
       continue;
     }
 
-    if (msg.header.msg_type == JOIN) {
+    if (msg.header.msg_type == PING) {
+      printf("RX PING\n");
+      fflush(stdout);
+      send_pong(conn, &msg.header, &sp->self_id);
+    } else if (msg.header.msg_type == JOIN) {
       ack_t ack;
       error_t err;
 
-      if (join.ipv4 == 0) {
-        join.ipv4 = peer_addr.sin_addr.s_addr;
+      if (payload.join.ipv4 == 0) {
+        payload.join.ipv4 = peer_addr.sin_addr.s_addr;
       }
-      if (join.port == 0) {
-        join.port = ntohs(peer_addr.sin_port);
+      if (payload.join.port == 0) {
+        payload.join.port = ntohs(peer_addr.sin_port);
       }
 
       memset(&ack, 0, sizeof ack);
       memset(&err, 0, sizeof err);
-      if (superpeer_handle_join(sp, &msg.header, &join, &ack, &err)) {
+      if (superpeer_handle_join(sp, &msg.header, &payload.join, &ack, &err)) {
         send_ack(conn, &msg.header, &sp->self_id, &ack);
         member_table_print(&sp->members);
       } else {
@@ -261,6 +312,13 @@ int superpeer_run(superpeer_t *sp) {
         }
         send_error(conn, &msg.header, &sp->self_id, err.code,
                    err.reason[0] ? (const char *)err.reason : "JOIN rejected");
+      }
+    } else if (msg.header.msg_type == LEAVE) {
+      ack_t ack;
+
+      memset(&ack, 0, sizeof ack);
+      if (superpeer_handle_leave(sp, &msg.header, &payload.leave, &ack)) {
+        send_ack(conn, &msg.header, &sp->self_id, &ack);
       }
     } else {
       send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
