@@ -161,5 +161,28 @@ int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *a
  */
 int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason);
 
+/**
+ * @brief Envia um JOIN (mensagem de origem, não reply).
+ * @param fd Socket conectado ao Super Peer.
+ * @param self NodeID de quem entra (vira @c src_node e @c join.node_id).
+ * @param join IPv4/porta anunciados e @c node_type.
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_join(int fd, const node_id_t *self, const join_t *join);
+
+/**
+ * @brief Envia um LEAVE (mensagem de origem, não reply).
+ * @param fd Socket conectado ao Super Peer.
+ * @param self NodeID de quem sai (vira @c src_node).
+ * @param leave Se @c node_id estiver zerado, usa @p self.
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_leave(int fd, const node_id_t *self, const leave_t *leave);
+
+/**
+ * @brief Tamanho fixo do payload no fio, ou @c -1 se o tipo for inválido.
+ * @param t Valor de @c message_type.
+ */
 int32_t payload_size_for(uint16_t t);
+
 #endif
