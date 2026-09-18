@@ -6,7 +6,7 @@
 
 /**
  * @file node.h
- * @brief Identidade do nó, UUID e configuração local.
+ * @brief Identidade do nó e UUID.
  */
 
 /** Tamanho do NodeID / digest SHA-256, em bytes. */
@@ -38,15 +38,6 @@ typedef enum {
   peer,      /**< Cliente: upload/download e armazenamento local. */
   superpeer  /**< Nó da overlay: membership, metadata, Chord, etc. */
 } node_type_t;
-
-/**
- * @brief Configuração local lida do arquivo .conf.
- */
-typedef struct {
-  uint32_t ipv4; /**< IPv4 anunciado, network byte order. */
-  uint16_t port; /**< Porta TCP, host byte order. */
-  node_type_t node_type; /**< peer ou superpeer. */
-} node_config_t;
 
 /**
  * @brief Calcula SHA-256 de um buffer.
