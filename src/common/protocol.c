@@ -14,6 +14,14 @@
 #include "../../include/common/protocol.h"
 
 
+/*
+ * protocol.c — header padrao, serializacao (pack/unpack), CRC32 e framing.
+ * Tudo no fio vai em big-endian; o CRC32 (zlib) cobre apenas o payload.
+ * Uma mensagem = HEADER_SIZE bytes de header + pl_size bytes de payload.
+ */
+
+
+/* ntohll portavel: converte uint64 de network para host byte order. */
 static uint64_t my_ntohll(uint64_t val) {
     #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
         return val;
@@ -26,6 +34,7 @@ static uint64_t my_ntohll(uint64_t val) {
 
 
 
+/* Tamanho fixo do payload de cada tipo de controle (bytes). */
 static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[JOIN] = 39,
 	[PING] = 0,
@@ -35,6 +44,7 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[ACK] = 32,
 };
 
+/* Tamanho do payload de um tipo, ou -1 se fora de faixa. */
 int32_t payload_size_for(uint16_t t) {
     if (t >= MSG_TYPE_MAX) return -1;
     return payload_sizes[t];
@@ -58,15 +68,17 @@ const char *message_type_name(uint16_t t) {
 
 //TEMP
 
+/* Serializa join_t no buffer (32B node_id + 4B ipv4 + 2B port + 1B tipo = 39B). */
 int pack_join(const join_t* in_st, char* out_msg){
 	char* pt = out_msg;
 	//uint32_t temp_32;
 	uint16_t temp_16;
-	uint32_t temp_32; 
+	uint32_t temp_32;
 
 	memcpy(pt, in_st->node_id, sizeof(uint8_t)*32);
 	pt += sizeof(uint8_t)*32;
-	
+
+	/* ipv4 ja vem em network byte order da config; nao reconverter. */
 	//temp_32 = htonl(in_st->ipv4);
 	temp_32 = in_st->ipv4;
 	memcpy(pt, &temp_32, sizeof(uint32_t));
@@ -82,6 +94,7 @@ int pack_join(const join_t* in_st, char* out_msg){
 }
 
 
+/* Le join_t do buffer recebido (inverso de pack_join). */
 int unpack_join(join_t* out_st, const char* in_msg){
 	const char* pt = in_msg;
 	//uint32_t temp_32;
@@ -105,15 +118,17 @@ int unpack_join(join_t* out_st, const char* in_msg){
 	return 0;
 }
 
+/* Serializa ack_t (32B node_id). */
 int pack_ack(const ack_t* in_st, char* out_msg){
 	char* pt = out_msg;
 
 	memcpy(pt, in_st->node_id, sizeof(uint8_t)*32);
 	pt += sizeof(uint8_t)*32;
-	
+
 	return 0;
 }
 
+/* Le ack_t (32B node_id). */
 int unpack_ack(ack_t* out_st, const char* in_msg){
 	const char* pt = in_msg;
 
@@ -124,6 +139,7 @@ int unpack_ack(ack_t* out_st, const char* in_msg){
 }
 
 
+/* Serializa error_t (4B code big-endian + 64B reason = 68B). */
 int pack_error(const error_t* in_st, char* out_msg){
 	char* pt = out_msg;
 	uint32_t temp_32 = htonl(in_st->code);
@@ -136,6 +152,7 @@ int pack_error(const error_t* in_st, char* out_msg){
 	return 0;
 }
 
+/* Le error_t (inverso de pack_error). */
 int unpack_error(error_t* out_st, const char* in_msg){
 	const char* pt = in_msg;
 	uint32_t temp_32;
@@ -149,16 +166,19 @@ int unpack_error(error_t* out_st, const char* in_msg){
 	return 0;
 }
 
+/* Serializa leave_t (32B node_id). */
 int pack_leave(const leave_t* in_st, char* out_msg){
 	memcpy(out_msg, in_st->node_id, sizeof(uint8_t)*32);
 	return 0;
 }
 
+/* Le leave_t (32B node_id). */
 int unpack_leave(leave_t* out_st, const char* in_msg){
 	memcpy(out_st->node_id, in_msg, sizeof(uint8_t)*32);
 	return 0;
 }
 
+/* Le o header de 99 bytes do buffer, convertendo os campos de big-endian. */
 int unpack_header(pl_header* out_st, const char* in_msg){
 	const char* pt = in_msg;
 	uint16_t temp_16;
@@ -191,6 +211,7 @@ int unpack_header(pl_header* out_st, const char* in_msg){
 	return 0;
 }
 
+/* Serializa o header de 99 bytes no buffer, em big-endian. */
 int pack_header(const pl_header* in_st, char* out_st){
 	char* pt = out_st;
 	uint16_t temp_16;
@@ -225,6 +246,10 @@ int pack_header(const pl_header* in_st, char* out_st){
 }
 
 
+/*
+ * Empacota o payload conforme o tipo, calcula o CRC32 do payload, serializa o
+ * header e envia HEADER_SIZE + pl_size bytes num unico send_all.
+ */
 int send_message(int fd, char *out_msg_buffer, const void *msg_payload,
                  pl_header *msg_header) {
     int status;
@@ -258,6 +283,7 @@ int send_message(int fd, char *out_msg_buffer, const void *msg_payload,
         return NET_ERROR;
     }
 
+    /* Checksum cobre apenas o payload; o header ja empacotado o carrega. */
     uLong crc = crc32(0L, Z_NULL, 0);
     if (payload_size > 0)
         crc = crc32(crc, (const Bytef *)payload_area, payload_size);
@@ -272,13 +298,18 @@ int send_message(int fd, char *out_msg_buffer, const void *msg_payload,
     return NET_OK;
 }
 
+/*
+ * Le o header, valida versao/tipo/pl_size, le o payload, confere o CRC32 e
+ * desserializa para struct_payload. Devolve msg_t com header, payload e status.
+ */
 msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 
-	char header_buffer[HEADER_SIZE]; 
+	char header_buffer[HEADER_SIZE];
 
 	int status;
 	uLong crc = crc32(0L, Z_NULL, 0);
-	
+
+	/* 1) header de tamanho fixo */
 	if((status = recv_all(fd, header_buffer, HEADER_SIZE)) != NET_OK)
 		return (msg_t){{0}, NULL, status};
 
@@ -299,17 +330,21 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 		return (msg_t){{0}, NULL, status};
 	}
 
+	/* Tipos de payload variavel (CP2+) ficam fora da validacao de tamanho fixo. */
 	if(message_type != DOWNLOAD_REP && message_type != DOWNLOAD_REQ &&  message_type != GOSSIP && message_type != STATE_TRANSFER && message_type != SNAPSHOT){
+		/* pl_size precisa casar com o tamanho esperado do tipo. */
 		if(payload_size > MAX_CONTROL_PAYLOAD_SZ || payload_sizes[message_type] != payload_size){
 			fprintf(stderr, "recv_message # corrupted header");
-			status = NET_ERROR; 
+			status = NET_ERROR;
 			return (msg_t){{0}, NULL, status};
 		}
+		/* 2) payload; 3) valida o CRC antes de aceitar a mensagem. */
 		if((status = recv_all(fd, in_msg_buffer, payload_size))!= NET_OK)
 			return (msg_t){{0}, NULL, status};
 		crc = crc32(crc, (const Bytef *)in_msg_buffer, payload_size);
 		if(msg_header.checksum != (uint32_t)crc)
 			return (msg_t){msg_header, in_msg_buffer, NET_ERROR};
+		/* 4) desserializa para o struct do tipo recebido. */
 		switch(message_type){
 			case JOIN: {
 				join_t new_st;
@@ -348,6 +383,7 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 	return (msg_t){msg_header, struct_payload, NET_OK}; 
 }
 
+/* Variante de send_message para um payload de bytes/string arbitrario. */
 int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header){
 
 	int status;
@@ -381,8 +417,9 @@ int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_
 	return NET_OK;
 }
 
+/* Variante de recv_message para um payload de bytes/string arbitrario. */
 msg_t simple_recv(int fd, char* payload, uint32_t str_size){
-	char header_buffer[HEADER_SIZE]; 
+	char header_buffer[HEADER_SIZE];
 
 	int status;
 	
@@ -417,6 +454,7 @@ msg_t simple_recv(int fd, char* payload, uint32_t str_size){
 	return (msg_t){msg_header, payload, NET_OK}; 
 }
 
+/* Monta um header de resposta: ecoa o TransactionID e troca src/dst. */
 void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *self, uint16_t msg_type,
                        uint32_t pl_size) {
 	if (!out || !in || !self) {
@@ -433,8 +471,9 @@ void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *sel
 }
 
 
+/* Atalho: responde LEAVE ecoando o TransactionID de req. */
 int send_leave(int fd, const pl_header *req, const node_id_t *self, const leave_t *leave){
-	char buf[HEADER_SIZE + payload_sizes[LEAVE]];	
+	char buf[HEADER_SIZE + payload_sizes[LEAVE]];
 	pl_header hdr;
 
 	if(!req || !self || !leave)
@@ -444,8 +483,9 @@ int send_leave(int fd, const pl_header *req, const node_id_t *self, const leave_
 	return send_message(fd, buf, buf, &hdr);
 }
 
+/* Atalho: responde JOIN ecoando o TransactionID de req. */
 int send_join(int fd, const pl_header *req, const node_id_t *self, const join_t *join){
-	char buf[HEADER_SIZE + payload_sizes[JOIN]];	
+	char buf[HEADER_SIZE + payload_sizes[JOIN]];
 	pl_header hdr;
 
 	if(!req || !self || !join)
@@ -455,6 +495,7 @@ int send_join(int fd, const pl_header *req, const node_id_t *self, const join_t 
 	return send_message(fd, buf, buf, &hdr);
 }
 
+/* Atalho: responde ACK ecoando o TransactionID de req. */
 int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *ack) {
 	char buf[HEADER_SIZE + payload_sizes[ACK]];
 	pl_header hdr;
@@ -466,6 +507,7 @@ int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *a
 	return send_message(fd, buf, ack, &hdr);
 }
 
+/* Atalho: responde ERROR (code + reason) ecoando o TransactionID de req. */
 int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason) {
 	char buf[HEADER_SIZE + payload_sizes[ERROR]];
 	pl_header hdr;
