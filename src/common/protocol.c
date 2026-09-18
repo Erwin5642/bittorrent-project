@@ -37,9 +37,11 @@ int pack_join(const join_t* in_st, char* out_msg){
 	memcpy(pt, in_st->node_id, sizeof(uint8_t)*32);
 	pt += sizeof(uint8_t)*32;
 	
+	/*
 	temp_32 = htonl(in_st->ipv4);
 	memcpy(pt, &temp_32, sizeof(uint32_t));
 	pt += sizeof(uint32_t);
+	*/
 
 	temp_16 = htons(in_st->port);
 	memcpy(pt, &temp_16, sizeof(uint16_t));
@@ -59,9 +61,11 @@ int unpack_join(join_t* out_st, const char* in_msg){
 	memcpy(out_st->node_id, pt, sizeof(uint8_t)*32);
 	pt += sizeof(uint8_t)*32;
 	
+	/*
 	memcpy(&temp_32, pt, sizeof(uint32_t));
 	out_st->ipv4 = ntohl(temp_32);
 	pt += sizeof(uint32_t);
+	*/ 
 
 	memcpy(&temp_16, pt, sizeof(uint16_t));
 	out_st->port = ntohs(temp_16);
