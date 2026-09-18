@@ -122,14 +122,14 @@ int unpack_error(error_t* out_st, const char* in_msg){
 
 int unpack_header(pl_header* out_st, const char* in_msg){
 	const char* pt = in_msg;
+	uint16_t temp_16;
 	uint32_t temp_32;
 	uint64_t temp_64;
-	memcpy(&temp_32, pt, sizeof(uint32_t));
-	out_st->protocol_ver = ntohl(temp_32);
-	pt+=sizeof(uint32_t);
-	memcpy(&temp_32, pt, sizeof(uint32_t));
-	out_st->msg_type = ntohl(temp_32);
-	pt+=sizeof(uint32_t);
+	
+	pt+=sizeof(uint8_t);
+	memcpy(&temp_16, pt, sizeof(uint16_t));
+	out_st->msg_type = ntohl(temp_16);
+	pt+=sizeof(uint16_t);
 
 	memcpy(out_st->src_node, pt, sizeof(uint8_t)*32);
 	pt+=(sizeof(uint8_t)*32);
@@ -153,15 +153,14 @@ int unpack_header(pl_header* out_st, const char* in_msg){
 
 int pack_header(const pl_header* in_st, char* out_st){
 	char* pt = out_st;
+	uint16_t temp_16;
 	uint32_t temp_32;
 	uint64_t temp_64;
-	temp_32 = htonl(in_st->protocol_ver);
-	memcpy(pt, &temp_32, sizeof(uint32_t));
-	pt+=sizeof(uint32_t);
 
-	temp_32 = htonl(in_st->msg_type);
-	memcpy(pt, &temp_32, sizeof(uint32_t));
-	pt+=sizeof(uint32_t);
+	pt+=sizeof(uint8_t);
+	temp_16 = htonl(in_st->msg_type);
+	memcpy(pt, &temp_16, sizeof(uint16_t));
+	pt+=sizeof(uint16_t);
 
 	memcpy(pt, in_st->src_node, sizeof(uint8_t)*32);
 	pt+=(sizeof(uint8_t)*32);
@@ -293,5 +292,63 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 
 }
 
+int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, const pl_header* msg_header){
 
+	int status;
+	char* buffer_pointer = out_msg_buffer;
+	uint32_t message_type = msg_header->msg_type;
+	uint32_t payload_size = msg_header->pl_size;
+
+	pack_header(msg_header, buffer_pointer);
+	buffer_pointer += HEADER_SIZE;
+
+	if(message_type >= MSG_TYPE_MAX){
+		fprintf(stderr, "recv_message # corrupted header");
+		status = NET_ERROR; // TODO: add more error status types for logging
+		return status;
+	}
+
+	if(payload_size > MAX_CONTROL_PAYLOAD_SZ || str_size != payload_size){
+		fprintf(stderr, "recv_message # corrupted header");
+		status = NET_ERROR; 
+		return status;
+	}
+
+	if((status = send_all(fd, out_msg_buffer, HEADER_SIZE + payload_size)) != NET_OK)
+		return status;
+
+	return NET_OK;
+}
+
+msg_t simple_recv(int fd, char* payload, uint32_t str_size){
+	char header_buffer[HEADER_SIZE]; 
+
+	int status;
+	
+	if((status = recv_all(fd, header_buffer, HEADER_SIZE)) != NET_OK)
+		return (msg_t){{0}, NULL, status};
+
+	pl_header msg_header;
+
+	unpack_header(&msg_header, header_buffer);
+	
+	uint32_t payload_size = msg_header.pl_size;
+	uint32_t message_type = msg_header.msg_type;
+
+	if(message_type >= MSG_TYPE_MAX){
+		fprintf(stderr, "recv_message # corrupted header");
+		status = NET_ERROR; // TODO: add more error status types for logging
+		return (msg_t){{0}, NULL, status};
+	}
+
+	if(payload_size > MAX_CONTROL_PAYLOAD_SZ || str_size != payload_size){
+		fprintf(stderr, "recv_message # corrupted header");
+		status = NET_ERROR; 
+		return (msg_t){{0}, NULL, status};
+	}
+	if((status = recv_all(fd, payload, str_size))!= NET_OK)
+		return (msg_t){{0}, NULL, status};
+			
+	return (msg_t){msg_header, payload, NET_OK}; 
+}
 
