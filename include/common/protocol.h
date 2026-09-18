@@ -1,18 +1,9 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
-#include <endian.h>
-#include <netinet/in.h>
-#include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/types.h>
-#include <arpa/inet.h>
 
-#include "../../include/common/network.h"
-
-#define HEADER_SIZE 104
+#define HEADER_SIZE 99 
 #define MAX_CONTROL_PAYLOAD_SZ 4096
 
 enum message_type{
@@ -47,15 +38,15 @@ typedef enum node_type{
 }node_type;
 
 typedef enum metadata_status{
-	ATIVO,
-	REPLICANDO,
-	REMOVIDO,
+	ACTIVE,
+	REPLICATING,	
+	REMOVED,
 }mtdata_status;
 
 //TODO:  types of each attribute to be decided
 typedef struct payloadHeader{
-	uint32_t protocol_ver;
-	uint32_t msg_type;
+	uint8_t protocol_ver;
+	uint16_t msg_type;
 	uint8_t src_node[32];
 	uint8_t dst_node[32];
 	uint8_t trsc_id[16];
