@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests 
-LDFLAGS = -lcrypto -lz
+CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests -pthread
+LDFLAGS = -lcrypto -lz -pthread
 
 BIN_DIR = bin
 OBJ_DIR = obj
