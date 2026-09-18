@@ -7,15 +7,19 @@
 
 /**
  * @file protocol.h
- * @brief Framing TCP, header padrão e payloads de controle (JOIN/ACK/ERROR).
+ * @brief Framing TCP, header padrão e payloads de controle (JOIN/PING/PONG/LEAVE/ACK/ERROR).
  */
 
 #define HEADER_SIZE 99
 #define MAX_CONTROL_PAYLOAD_SZ 4096
+/** Versão do framing no primeiro byte do header (`!BH` no fio). */
+#define PROTOCOL_VER 1
 
 enum message_type{
-	JOIN,
-	LEAVE,
+	JOIN = 0,
+	PING = 1,
+	PONG = 2,
+	LEAVE = 3,
 	LOOKUP,
 	STORE,
 	DOWNLOAD_REQ,
@@ -85,6 +89,13 @@ typedef struct joinPayload{
 	uint16_t port;
 	uint8_t node_type;
 }join_t;
+
+/**
+ * @brief Payload de LEAVE: NodeID de quem sai (32 bytes).
+ */
+typedef struct leavePayload{
+	uint8_t node_id[32];
+}leave_t;
 
 typedef struct ackPayload{
 	uint8_t node_id[32];

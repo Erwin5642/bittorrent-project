@@ -18,7 +18,7 @@ SUPERPEER_OBJ = $(OBJ_DIR)/superpeer/superpeer.o
 SUPERPEER_MAIN_OBJ = $(OBJ_DIR)/superpeer/main.o
 
 # Executáveis a gerar
-TARGETS = $(BIN_DIR)/superpeer
+TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node
 TEST_NODE = $(BIN_DIR)/test_node
 TEST_CONFIG = $(BIN_DIR)/test_config
 TEST_SUPERPEER = $(BIN_DIR)/test_superpeer
@@ -41,6 +41,9 @@ $(OBJ_DIR):
 # Ligação
 $(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(SUPERPEER_MAIN_OBJ) $(COMMON_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/node: $(BIN_DIR)/superpeer
+	cp -f $< $@
 
 $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)

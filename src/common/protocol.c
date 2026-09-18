@@ -24,10 +24,11 @@ static uint64_t my_ntohll(uint64_t val) {
 
 static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[JOIN] = 39,
+	[PING] = 0,
+	[PONG] = 0,
 	[LEAVE] = 32,
 	[ERROR] = 68,
 	[ACK] = 32,
-
 };
 
 int pack_join(const join_t* in_st, char* out_msg){
@@ -121,15 +122,26 @@ int unpack_error(error_t* out_st, const char* in_msg){
 	return 0;
 }
 
+int pack_leave(const leave_t* in_st, char* out_msg){
+	memcpy(out_msg, in_st->node_id, sizeof(uint8_t)*32);
+	return 0;
+}
+
+int unpack_leave(leave_t* out_st, const char* in_msg){
+	memcpy(out_st->node_id, in_msg, sizeof(uint8_t)*32);
+	return 0;
+}
+
 int unpack_header(pl_header* out_st, const char* in_msg){
 	const char* pt = in_msg;
 	uint16_t temp_16;
 	uint32_t temp_32;
 	uint64_t temp_64;
-	
+
+	out_st->protocol_ver = (uint8_t)*pt;
 	pt+=sizeof(uint8_t);
 	memcpy(&temp_16, pt, sizeof(uint16_t));
-	out_st->msg_type = ntohl(temp_16);
+	out_st->msg_type = ntohs(temp_16);
 	pt+=sizeof(uint16_t);
 
 	memcpy(out_st->src_node, pt, sizeof(uint8_t)*32);
@@ -158,8 +170,9 @@ int pack_header(const pl_header* in_st, char* out_st){
 	uint32_t temp_32;
 	uint64_t temp_64;
 
+	*pt = (char)in_st->protocol_ver;
 	pt+=sizeof(uint8_t);
-	temp_16 = htonl(in_st->msg_type);
+	temp_16 = htons(in_st->msg_type);
 	memcpy(pt, &temp_16, sizeof(uint16_t));
 	pt+=sizeof(uint16_t);
 
@@ -212,6 +225,13 @@ int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl
 				pack_join(msg_payload, buffer_pointer);
 				break;
 			}
+			case PING:
+			case PONG:
+				break;
+			case LEAVE: {
+				pack_leave(msg_payload, buffer_pointer);
+				break;
+			}
 			case ACK: {
 				pack_ack(msg_payload, buffer_pointer); 
 				break;
@@ -244,7 +264,11 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 	pl_header msg_header;
 
 	unpack_header(&msg_header, header_buffer);
-	
+
+	if (msg_header.protocol_ver != PROTOCOL_VER) {
+		return (msg_t){msg_header, NULL, NET_ERROR};
+	}
+
 	uint32_t payload_size = msg_header.pl_size;
 	uint32_t message_type = msg_header.msg_type;
 
@@ -268,6 +292,15 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 				join_t new_st;
 				unpack_join(&new_st, in_msg_buffer);
 				memcpy(struct_payload, &new_st, sizeof(join_t));
+				break;
+			}
+			case PING:
+			case PONG:
+				break;
+			case LEAVE: {
+				leave_t new_st;
+				unpack_leave(&new_st, in_msg_buffer);
+				memcpy(struct_payload, &new_st, sizeof(leave_t));
 				break;
 			}
 			case ACK: {
@@ -359,7 +392,7 @@ void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *sel
 		return;
 	}
 	memset(out, 0, sizeof *out);
-	out->protocol_ver = in->protocol_ver;
+	out->protocol_ver = PROTOCOL_VER;
 	out->msg_type = msg_type;
 	memcpy(out->src_node, self->bytes, NODE_ID_SIZE);
 	memcpy(out->dst_node, in->src_node, NODE_ID_SIZE);
