@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests
-LDFLAGS = -lcrypto
+CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests 
+LDFLAGS = -lcrypto -lz
 
 BIN_DIR = bin
 OBJ_DIR = obj
@@ -16,9 +16,10 @@ COMMON_OBJS = \
 	$(OBJ_DIR)/common/protocol.o
 SUPERPEER_OBJ = $(OBJ_DIR)/superpeer/superpeer.o
 SUPERPEER_MAIN_OBJ = $(OBJ_DIR)/superpeer/main.o
+PEER_MAIN_OBJ = $(OBJ_DIR)/peer/peer.o
 
 # Executáveis a gerar
-TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node
+TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node $(BIN_DIR)/client
 TEST_NODE = $(BIN_DIR)/test_node
 TEST_CONFIG = $(BIN_DIR)/test_config
 TEST_SUPERPEER = $(BIN_DIR)/test_superpeer
@@ -45,8 +46,11 @@ $(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(SUPERPEER_MAIN_OBJ) $(COMMON_OBJS)
 $(BIN_DIR)/node: $(BIN_DIR)/superpeer
 	cp -f $< $@
 
-$(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(COMMON_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) 
 
 $(BIN_DIR)/test_config: tests/common/test_config.c $(OBJ_DIR)/common/config.o $(TEST_UTILS_OBJ) | $(BIN_DIR) $(OBJ_DIR)
 	$(CC) $(CFLAGS) $^ -o $@

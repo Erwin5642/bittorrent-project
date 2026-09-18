@@ -49,6 +49,13 @@ typedef enum metadata_status{
 	REMOVED,
 }mtdata_status;
 
+// TEMP
+
+const char *message_type_name(uint16_t t);
+
+// TEMP
+
+
 //TODO:  types of each attribute to be decided
 typedef struct payloadHeader{
 	uint8_t protocol_ver;
@@ -117,6 +124,8 @@ int pack_header(const pl_header* in_st, char* out_st);
 */
 int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl_header* msg_header);
 msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload);
+int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header);
+msg_t simple_recv(int fd, char* payload, uint32_t str_size);
 
 /**
  * @brief Monta um header de resposta: ecoa TransactionID, troca src/dst.
