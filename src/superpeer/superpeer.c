@@ -9,7 +9,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 void member_table_init(member_table_t *table) {
   if (!table) {
@@ -151,8 +153,14 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     return 0;
   }
 
+  if (pthread_mutex_init(&sp->members_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init mutex\n");
+    return 0;
+  }
+
   fd = net_listen(cfg.port);
   if (fd < 0) {
+    pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
   sp->listend_fd = fd;
@@ -258,72 +266,106 @@ static int send_pong(int fd, const pl_header *req, const node_id_t *self) {
   return send_message(fd, buf, NULL, &hdr);
 }
 
+typedef struct {
+  superpeer_t *sp;
+  int conn;
+  struct sockaddr_in peer_addr;
+} conn_job_t;
+
+static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer_addr) {
+  char in_buf[MAX_CONTROL_PAYLOAD_SZ];
+  union {
+    join_t join;
+    leave_t leave;
+  } payload;
+  msg_t msg;
+
+  memset(&payload, 0, sizeof payload);
+  msg = recv_message(conn, in_buf, &payload);
+  if (msg.status != NET_OK) {
+    net_close(conn);
+    return;
+  }
+
+  if (msg.header.msg_type == PING) {
+    printf("RX PING\n");
+    fflush(stdout);
+    send_pong(conn, &msg.header, &sp->self_id);
+  } else if (msg.header.msg_type == JOIN) {
+    ack_t ack;
+    error_t err;
+    int ok;
+
+    if (payload.join.ipv4 == 0) {
+      payload.join.ipv4 = peer_addr.sin_addr.s_addr;
+    }
+    if (payload.join.port == 0) {
+      payload.join.port = ntohs(peer_addr.sin_port);
+    }
+
+    memset(&ack, 0, sizeof ack);
+    memset(&err, 0, sizeof err);
+    pthread_mutex_lock(&sp->members_lock);
+    ok = superpeer_handle_join(sp, &msg.header, &payload.join, &ack, &err);
+    if (ok) {
+      member_table_print(&sp->members);
+    }
+    pthread_mutex_unlock(&sp->members_lock);
+    if (ok) {
+      send_ack(conn, &msg.header, &sp->self_id, &ack);
+    } else {
+      if (err.code == 0) {
+        err.code = 1;
+      }
+      send_error(conn, &msg.header, &sp->self_id, err.code,
+                 err.reason[0] ? (const char *)err.reason : "JOIN rejected");
+    }
+  } else if (msg.header.msg_type == LEAVE) {
+    ack_t ack;
+
+    memset(&ack, 0, sizeof ack);
+    pthread_mutex_lock(&sp->members_lock);
+    superpeer_handle_leave(sp, &msg.header, &payload.leave, &ack);
+    pthread_mutex_unlock(&sp->members_lock);
+    send_ack(conn, &msg.header, &sp->self_id, &ack);
+  } else {
+    send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
+  }
+
+  net_close(conn);
+}
+
+static void *connection_worker(void *arg) {
+  conn_job_t *job = arg;
+
+  handle_connection(job->sp, job->conn, job->peer_addr);
+  free(job);
+  return NULL;
+}
+
 int superpeer_run(superpeer_t *sp) {
   if (!sp || sp->listend_fd < 0) {
     return 0;
   }
 
   while (1) {
-    struct sockaddr_in peer_addr;
-    int conn;
-    char in_buf[MAX_CONTROL_PAYLOAD_SZ];
-    union {
-      join_t join;
-      leave_t leave;
-    } payload;
-    msg_t msg;
+    pthread_t th;
+    conn_job_t *job = malloc(sizeof *job);
 
-    memset(&peer_addr, 0, sizeof(peer_addr));
-    conn = net_accept(sp->listend_fd, &peer_addr);
-    if (conn < 0) {
+    if (!job) {
       continue;
     }
-
-    memset(&payload, 0, sizeof payload);
-    msg = recv_message(conn, in_buf, &payload);
-    if (msg.status != NET_OK) {
-      net_close(conn);
+    job->sp = sp;
+    memset(&job->peer_addr, 0, sizeof job->peer_addr);
+    job->conn = net_accept(sp->listend_fd, &job->peer_addr);
+    if (job->conn < 0) {
+      free(job);
       continue;
     }
-
-    if (msg.header.msg_type == PING) {
-      printf("RX PING\n");
-      fflush(stdout);
-      send_pong(conn, &msg.header, &sp->self_id);
-    } else if (msg.header.msg_type == JOIN) {
-      ack_t ack;
-      error_t err;
-
-      if (payload.join.ipv4 == 0) {
-        payload.join.ipv4 = peer_addr.sin_addr.s_addr;
-      }
-      if (payload.join.port == 0) {
-        payload.join.port = ntohs(peer_addr.sin_port);
-      }
-
-      memset(&ack, 0, sizeof ack);
-      memset(&err, 0, sizeof err);
-      if (superpeer_handle_join(sp, &msg.header, &payload.join, &ack, &err)) {
-        send_ack(conn, &msg.header, &sp->self_id, &ack);
-        member_table_print(&sp->members);
-      } else {
-        if (err.code == 0) {
-          err.code = 1;
-        }
-        send_error(conn, &msg.header, &sp->self_id, err.code,
-                   err.reason[0] ? (const char *)err.reason : "JOIN rejected");
-      }
-    } else if (msg.header.msg_type == LEAVE) {
-      ack_t ack;
-
-      memset(&ack, 0, sizeof ack);
-      if (superpeer_handle_leave(sp, &msg.header, &payload.leave, &ack)) {
-        send_ack(conn, &msg.header, &sp->self_id, &ack);
-      }
-    } else {
-      send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
+    if (pthread_create(&th, NULL, connection_worker, job) != 0) {
+      connection_worker(job);
+      continue;
     }
-
-    net_close(conn);
+    pthread_detach(th);
   }
 }
