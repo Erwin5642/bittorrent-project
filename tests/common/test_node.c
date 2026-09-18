@@ -195,6 +195,51 @@ static void test_random_ids_differ(void) {
 }
 
 /**
+ * @brief Exige igualdade, ordem lexicográfica e tratamento de ponteiro nulo.
+ */
+static void test_id_cmp(void) {
+  node_id_t a;
+  node_id_t b;
+
+  memset(&a, 0, sizeof a);
+  memset(&b, 0, sizeof b);
+  expect(node_id_cmp(&a, &b) == 0, "IDs iguais comparam 0");
+
+  b.bytes[0] = 1;
+  expect(node_id_cmp(&a, &b) < 0, "00.. menor que 01..");
+  expect(node_id_cmp(&b, &a) > 0, "01.. maior que 00..");
+
+  a.bytes[0] = 1;
+  a.bytes[NODE_ID_SIZE - 1] = 1;
+  b.bytes[NODE_ID_SIZE - 1] = 2;
+  expect(node_id_cmp(&a, &b) < 0, "último byte desempata lexicograficamente");
+
+  expect(node_id_cmp(NULL, NULL) == 0, "dois nulos comparam 0");
+  expect(node_id_cmp(NULL, &a) < 0, "nulo é menor que ID válido");
+  expect(node_id_cmp(&a, NULL) > 0, "ID válido é maior que nulo");
+}
+
+/**
+ * @brief Confere hex minúsculo de 64 chars, buffer curto e argumentos nulos.
+ */
+static void test_id_to_hex(void) {
+  node_id_t id;
+  char hex[NODE_ID_HEX_SIZE];
+  char too_small[NODE_ID_HEX_SIZE - 1];
+
+  expect(parse_hex32("a92ddf0e5cc69064169ec0c8d00a9a53824ff98275840966ec6ea42fc775c56e", &id),
+         "parse vetor localhost para hex");
+  expect(node_id_to_hex(&id, hex, sizeof hex) == 1, "to_hex sucede");
+  expect(strlen(hex) == (size_t)(NODE_ID_SIZE * 2), "hex tem 64 caracteres");
+  expect(strcmp(hex, "a92ddf0e5cc69064169ec0c8d00a9a53824ff98275840966ec6ea42fc775c56e") == 0,
+         "hex minúsculo bate com o vetor conhecido");
+
+  expect(node_id_to_hex(&id, too_small, sizeof too_small) == 0, "buffer curto falha");
+  expect(node_id_to_hex(NULL, hex, sizeof hex) == 0, "id NULL falha");
+  expect(node_id_to_hex(&id, NULL, sizeof hex) == 0, "out NULL falha");
+}
+
+/**
  * @brief Executa a suíte de NodeID e devolve o código de test_report.
  */
 int main(void) {
@@ -207,6 +252,8 @@ int main(void) {
   test_null_args();
   test_uuid_random();
   test_random_ids_differ();
+  test_id_cmp();
+  test_id_to_hex();
 
   return test_report();
 }

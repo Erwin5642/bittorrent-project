@@ -77,3 +77,29 @@ int node_id_generate(const uint32_t ipv4, const uint16_t port, const node_uuid_t
 
   return sha256(buffer, sizeof(buffer), out->bytes);
 }
+
+int node_id_cmp(const node_id_t *a, const node_id_t *b) {
+  if (!a || !b) {
+    if (a == b) {
+      return 0;
+    }
+    return a ? 1 : -1;
+  }
+  return memcmp(a->bytes, b->bytes, NODE_ID_SIZE);
+}
+
+int node_id_to_hex(const node_id_t *id, char *out, size_t out_len) {
+  static const char hex[] = "0123456789abcdef";
+  size_t i;
+
+  if (!id || !out || out_len < NODE_ID_HEX_SIZE) {
+    return 0;
+  }
+
+  for (i = 0; i < NODE_ID_SIZE; i++) {
+    out[i * 2] = hex[id->bytes[i] >> 4];
+    out[i * 2 + 1] = hex[id->bytes[i] & 0x0f];
+  }
+  out[NODE_ID_SIZE * 2] = '\0';
+  return 1;
+}
