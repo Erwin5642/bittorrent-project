@@ -203,16 +203,23 @@ int pack_header(const pl_header* in_st, char* out_st){
 
 }
 
-int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl_header* msg_header){
+
+int send_message(int fd, char* out_msg_buffer, const void* msg_payload, pl_header* msg_header){
 		
 	int status;
 	char* buffer_pointer = out_msg_buffer;
 	uint32_t message_type = msg_header->msg_type;
 	uint32_t payload_size = msg_header->pl_size;
+	
+	uLong crc = crc32(0L, Z_NULL, 0);
+	crc = crc32(crc, (const Bytef *)msg_payload, payload_size);
+	msg_header->checksum = crc;
+
 
 	pack_header(msg_header, buffer_pointer);
 	buffer_pointer += HEADER_SIZE;
-
+	
+	
 	if(message_type >= MSG_TYPE_MAX){
 		fprintf(stderr, "recv_message # corrupted header");
 		status = NET_ERROR; // TODO: add more error status types for logging
@@ -220,12 +227,11 @@ int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl
 	}
 
 	if(message_type != DOWNLOAD_REP && message_type != DOWNLOAD_REQ && message_type != GOSSIP && message_type != STATE_TRANSFER && message_type != SNAPSHOT){
-		if(payload_size > MAX_CONTROL_PAYLOAD_SZ || payload_sizes[message_type] != payload_size){
+		if(payload_size <= 0 || payload_size > MAX_CONTROL_PAYLOAD_SZ || payload_sizes[message_type] != payload_size){
 			fprintf(stderr, "recv_message # corrupted header");
 			status = NET_ERROR; 
 			return status;
 		}
-	
 		switch(message_type){
 			case JOIN: {
 				pack_join(msg_payload, buffer_pointer);
@@ -239,14 +245,15 @@ int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl
 				pack_error(msg_payload, buffer_pointer);
 				break;
 			}
-
+			case PING: 
+				break;
+			case PONG:
+				break;
 			default:
 				return NET_ERROR; 
 		}
 		if((status = send_all(fd, out_msg_buffer ,HEADER_SIZE + payload_size)) != NET_OK)
 			return status;
-
-
 	}
 	return NET_OK;
 }
@@ -256,6 +263,7 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 	char header_buffer[HEADER_SIZE]; 
 
 	int status;
+	uLong crc = crc32(0L, Z_NULL, 0);
 	
 	if((status = recv_all(fd, header_buffer, HEADER_SIZE)) != NET_OK)
 		return (msg_t){{0}, NULL, status};
@@ -281,7 +289,9 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 		}
 		if((status = recv_all(fd, in_msg_buffer, payload_size))!= NET_OK)
 			return (msg_t){{0}, NULL, status};
-	
+		crc = crc32(crc, (const Bytef *)in_msg_buffer, payload_size);
+		if(msg_header.checksum != (uint32_t)crc)
+			return (msg_t){msg_header, in_msg_buffer, NET_ERROR};
 		switch(message_type){
 			case JOIN: {
 				join_t new_st;
@@ -308,6 +318,7 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 		}
 
 	}
+
 	return (msg_t){msg_header, struct_payload, NET_OK}; 
 
 }
