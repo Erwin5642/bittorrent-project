@@ -1,3 +1,4 @@
 bin/
 obj/
 compile_commands.json
+tests/c1/test_protocol
