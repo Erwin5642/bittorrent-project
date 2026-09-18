@@ -33,7 +33,7 @@ typedef struct {
 typedef struct {
   uint32_t ipv4; /**< IPv4 anunciado, network byte order. */
   uint16_t port; /**< Porta TCP, host byte order. */
-  node_type_t node_type; /**< peer ou superpeer. */
+  node_type_t node_type; /**< PEER ou SUPERPEER. */
   node_endpoint_t bootstrap[CONFIG_BOOTSTRAP_MAX]; /**< Super Peers iniciais. */
   int bootstrap_count; /**< Quantidade válida em @c bootstrap. */
 } node_config_t;

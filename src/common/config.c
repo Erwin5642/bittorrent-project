@@ -107,11 +107,11 @@ static int parse_bootstrap_list(const char *value, node_config_t *out) {
 
 static int parse_type(const char *s, node_type_t *out) {
   if (strcmp(s, "peer") == 0) {
-    *out = peer;
+    *out = PEER;
     return 1;
   }
   if (strcmp(s, "superpeer") == 0) {
-    *out = superpeer;
+    *out = SUPERPEER;
     return 1;
   }
   return 0;

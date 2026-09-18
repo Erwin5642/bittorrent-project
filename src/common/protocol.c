@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "../../include/common/network.h"
 #include "../../include/common/protocol.h"
@@ -350,5 +351,48 @@ msg_t simple_recv(int fd, char* payload, uint32_t str_size){
 		return (msg_t){{0}, NULL, status};
 			
 	return (msg_t){msg_header, payload, NET_OK}; 
+}
+
+void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *self, uint16_t msg_type,
+                       uint32_t pl_size) {
+	if (!out || !in || !self) {
+		return;
+	}
+	memset(out, 0, sizeof *out);
+	out->protocol_ver = in->protocol_ver;
+	out->msg_type = msg_type;
+	memcpy(out->src_node, self->bytes, NODE_ID_SIZE);
+	memcpy(out->dst_node, in->src_node, NODE_ID_SIZE);
+	memcpy(out->trsc_id, in->trsc_id, 16);
+	out->time = (uint64_t)time(NULL);
+	out->pl_size = pl_size;
+}
+
+int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *ack) {
+	char buf[HEADER_SIZE + 32];
+	pl_header hdr;
+
+	if (!req || !self || !ack) {
+		return NET_ERROR;
+	}
+	fill_reply_header(&hdr, req, self, ACK, 32);
+	return send_message(fd, buf, ack, &hdr);
+}
+
+int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason) {
+	char buf[HEADER_SIZE + 68];
+	pl_header hdr;
+	error_t err;
+
+	if (!req || !self) {
+		return NET_ERROR;
+	}
+	memset(&err, 0, sizeof err);
+	err.code = code;
+	if (reason) {
+		strncpy((char *)err.reason, reason, sizeof err.reason - 1);
+	}
+	fill_reply_header(&hdr, req, self, ERROR, 68);
+	return send_message(fd, buf, &err, &hdr);
 }
 
