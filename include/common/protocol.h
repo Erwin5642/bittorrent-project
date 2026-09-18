@@ -161,4 +161,5 @@ int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *a
  */
 int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason);
 
+int32_t payload_size_for(uint16_t t);
 #endif
