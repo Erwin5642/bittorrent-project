@@ -249,9 +249,6 @@ int send_message(int fd, char* out_msg_buffer, const void* msg_payload, pl_heade
 				pack_join(msg_payload, buffer_pointer);
 				break;
 			}
-			case PING:
-			case PONG:
-				break;
 			case LEAVE: {
 				pack_leave(msg_payload, buffer_pointer);
 				break;
@@ -322,9 +319,6 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 				memcpy(struct_payload, &new_st, sizeof(join_t));
 				break;
 			}
-			case PING:
-			case PONG:
-				break;
 			case LEAVE: {
 				leave_t new_st;
 				unpack_leave(&new_st, in_msg_buffer);
@@ -344,15 +338,16 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 				return (msg_t){msg_header, struct_payload, NET_OK}; 
 				break;
 			}
-
+			case PING:
+				break;
+			case PONG:
+				break;
 			default:
 				return (msg_t){msg_header, NULL, NET_OK}; 
 		}
 
 	}
-
 	return (msg_t){msg_header, struct_payload, NET_OK}; 
-
 }
 
 int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header){
@@ -439,19 +434,42 @@ void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *sel
 	out->pl_size = pl_size;
 }
 
+
+int send_leave(int fd, const pl_header *req, const node_id_t *self, const leave_t *leave){
+	char buf[HEADER_SIZE + payload_sizes[LEAVE]];	
+	pl_header hdr;
+
+	if(!req || !self || !leave)
+		return NET_ERROR;
+
+	fill_reply_header(&hdr, req, self, LEAVE, payload_sizes[LEAVE]);
+	return send_message(fd, buf, buf, &hdr);
+}
+
+int send_join(int fd, const pl_header *req, const node_id_t *self, const join_t *join){
+	char buf[HEADER_SIZE + payload_sizes[JOIN]];	
+	pl_header hdr;
+
+	if(!req || !self || !join)
+		return NET_ERROR;
+
+	fill_reply_header(&hdr, req, self, JOIN, payload_sizes[JOIN]);
+	return send_message(fd, buf, buf, &hdr);
+}
+
 int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *ack) {
-	char buf[HEADER_SIZE + 32];
+	char buf[HEADER_SIZE + payload_sizes[ACK]];
 	pl_header hdr;
 
 	if (!req || !self || !ack) {
 		return NET_ERROR;
 	}
-	fill_reply_header(&hdr, req, self, ACK, 32);
+	fill_reply_header(&hdr, req, self, ACK, payload_sizes[ACK]);
 	return send_message(fd, buf, ack, &hdr);
 }
 
 int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t code, const char *reason) {
-	char buf[HEADER_SIZE + 68];
+	char buf[HEADER_SIZE + payload_sizes[ERROR]];
 	pl_header hdr;
 	error_t err;
 
@@ -463,7 +481,7 @@ int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t cod
 	if (reason) {
 		strncpy((char *)err.reason, reason, sizeof err.reason - 1);
 	}
-	fill_reply_header(&hdr, req, self, ERROR, 68);
+	fill_reply_header(&hdr, req, self, ERROR, payload_sizes[ERROR]);
 	return send_message(fd, buf, &err, &hdr);
 }
 
