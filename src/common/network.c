@@ -1,10 +1,7 @@
-#include <stdint.h>
+#include<stdint.h>
 #include<stdio.h>
-#include<sys/socket.h>
 #include<unistd.h>
-#include<netinet/in.h>
 #include<arpa/inet.h>
-#include<pthread.h>
 #include "../../include/common/network.h"
 
 
