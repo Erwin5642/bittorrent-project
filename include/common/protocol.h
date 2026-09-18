@@ -101,6 +101,7 @@ typedef struct errorPayload{
 	uint32_t code;
 	uint8_t reason[64];
 }error_t;
+
 /*
 int pack_join(const join_t* in_st, char* out_msg);
 int unpack_join(join_t* out_st, const char* in_msg);
@@ -111,7 +112,8 @@ int unpack_error(error_t* out_st, const char* in_msg);
 int unpack_header(pl_header* out_st, const char* in_msg);
 int pack_header(const pl_header* in_st, char* out_st);
 */
-int send_message(int fd, char* out_msg_buffer, const void* msg_payload, const pl_header* msg_header);
+
+int send_message(int fd, char* out_msg_buffer, const void* msg_payload, pl_header* msg_header);
 msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload);
 int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header);
 msg_t simple_recv(int fd, char* payload, uint32_t str_size);
