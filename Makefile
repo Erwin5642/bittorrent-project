@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests
-LDFLAGS = -lcrypto
+CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests 
+LDFLAGS = -lcrypto -lz
 
 BIN_DIR = bin
 OBJ_DIR = obj
@@ -37,10 +37,10 @@ $(OBJ_DIR):
 
 # Ligação
 $(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(COMMON_OBJS)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) 
 
 $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) 
 
 $(BIN_DIR)/test_config: tests/common/test_config.c $(OBJ_DIR)/common/config.o $(TEST_UTILS_OBJ) | $(BIN_DIR) $(OBJ_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
