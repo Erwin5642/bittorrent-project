@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <zconf.h>
+#include <zlib.h>
 
 #include "../../include/common/network.h"
 #include "../../include/common/protocol.h"
@@ -292,12 +294,15 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload){
 
 }
 
-int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, const pl_header* msg_header){
+int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header){
 
 	int status;
 	char* buffer_pointer = out_msg_buffer;
 	uint32_t message_type = msg_header->msg_type;
 	uint32_t payload_size = msg_header->pl_size;
+	uLong crc = crc32(0L, Z_NULL, 0);
+	crc = crc32(crc, (const Bytef *)payload, strlen(payload));
+	msg_header->checksum = crc;
 
 	pack_header(msg_header, buffer_pointer);
 	buffer_pointer += HEADER_SIZE;
@@ -313,7 +318,7 @@ int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_
 		status = NET_ERROR; 
 		return status;
 	}
-
+	
 	if((status = send_all(fd, out_msg_buffer, HEADER_SIZE + payload_size)) != NET_OK)
 		return status;
 
@@ -349,6 +354,10 @@ msg_t simple_recv(int fd, char* payload, uint32_t str_size){
 	if((status = recv_all(fd, payload, str_size))!= NET_OK)
 		return (msg_t){{0}, NULL, status};
 			
+	uLong crc = crc32(0L, Z_NULL, 0);
+	crc = crc32(crc, (const Bytef *)payload, strlen(payload));
+	if(msg_header.checksum != crc)
+		return (msg_t){msg_header, payload, NET_ERROR};
 	return (msg_t){msg_header, payload, NET_OK}; 
 }
 
