@@ -61,5 +61,7 @@ não desenvolvimento de código. Portanto:
 - `github-issues` — abertura padronizada de issues (título, labels, corpo).
 - `github-prs` — abertura padronizada de PRs (título, corpo, vínculo com
   issue); usa `git-flow` para saber qual branch/base usar.
+- `c-api-docs` — documentar API C/C++ pública com Doxygen nos headers
+  (`include/`), em pt-br.
 
 Estas mesmas skills existem em `.cursor/rules/` para uso no Cursor.
