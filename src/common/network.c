@@ -45,7 +45,7 @@ int net_listen(uint16_t port){
 
 
 
-int net_connect(char* host_addr, uint16_t port){
+int net_connect(const char* host_addr, uint16_t port){
 	int net_fd;
 	struct sockaddr_in address;
 	socklen_t addrlen = sizeof(address);
