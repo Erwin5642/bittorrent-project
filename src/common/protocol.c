@@ -237,7 +237,7 @@ int send_message(int fd, char *out_msg_buffer, const void *msg_payload,
         return NET_ERROR;
     }
 
-    if (payload_sizes[message_type] < 0 &&
+    if (payload_sizes[message_type] >= 0 &&
         payload_size != (uint32_t)payload_sizes[message_type]) {
         fprintf(stderr, "send_message # tamanho invalido para %s\n",
                 message_type_name(message_type));
@@ -432,27 +432,56 @@ void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *sel
 	out->pl_size = pl_size;
 }
 
+static int fill_origin_header(pl_header *out, const node_id_t *self, uint16_t msg_type, uint32_t pl_size) {
+	node_uuid_t trsc;
 
-int send_leave(int fd, const pl_header *req, const node_id_t *self, const leave_t *leave){
-	char buf[HEADER_SIZE + payload_sizes[LEAVE]];	
-	pl_header hdr;
-
-	if(!req || !self || !leave)
-		return NET_ERROR;
-
-	fill_reply_header(&hdr, req, self, LEAVE, payload_sizes[LEAVE]);
-	return send_message(fd, buf, buf, &hdr);
+	if (!out || !self || !node_uuid_random(&trsc)) {
+		return 0;
+	}
+	memset(out, 0, sizeof *out);
+	out->protocol_ver = PROTOCOL_VER;
+	out->msg_type = msg_type;
+	memcpy(out->src_node, self->bytes, NODE_ID_SIZE);
+	memcpy(out->trsc_id, trsc.bytes, NODE_UUID_SIZE);
+	out->time = (uint64_t)time(NULL);
+	out->pl_size = pl_size;
+	return 1;
 }
 
-int send_join(int fd, const pl_header *req, const node_id_t *self, const join_t *join){
-	char buf[HEADER_SIZE + payload_sizes[JOIN]];	
+int send_leave(int fd, const node_id_t *self, const leave_t *leave) {
+	char buf[HEADER_SIZE + 32];
 	pl_header hdr;
+	leave_t body;
+	uint8_t zero_id[NODE_ID_SIZE];
 
-	if(!req || !self || !join)
+	if (!self || !leave) {
 		return NET_ERROR;
+	}
+	memset(zero_id, 0, sizeof zero_id);
+	body = *leave;
+	if (memcmp(body.node_id, zero_id, NODE_ID_SIZE) == 0) {
+		memcpy(body.node_id, self->bytes, NODE_ID_SIZE);
+	}
+	if (!fill_origin_header(&hdr, self, LEAVE, (uint32_t)payload_sizes[LEAVE])) {
+		return NET_ERROR;
+	}
+	return send_message(fd, buf, &body, &hdr);
+}
 
-	fill_reply_header(&hdr, req, self, JOIN, payload_sizes[JOIN]);
-	return send_message(fd, buf, buf, &hdr);
+int send_join(int fd, const node_id_t *self, const join_t *join) {
+	char buf[HEADER_SIZE + 39];
+	pl_header hdr;
+	join_t body;
+
+	if (!self || !join) {
+		return NET_ERROR;
+	}
+	body = *join;
+	memcpy(body.node_id, self->bytes, NODE_ID_SIZE);
+	if (!fill_origin_header(&hdr, self, JOIN, (uint32_t)payload_sizes[JOIN])) {
+		return NET_ERROR;
+	}
+	return send_message(fd, buf, &body, &hdr);
 }
 
 int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *ack) {
@@ -482,5 +511,3 @@ int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t cod
 	fill_reply_header(&hdr, req, self, ERROR, payload_sizes[ERROR]);
 	return send_message(fd, buf, &err, &hdr);
 }
-
-int32_t payload_size_for(uint16_t t);

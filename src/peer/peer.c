@@ -47,30 +47,36 @@ int peer_init(peer_t* peer, const char *conf_path){
 	node_uuid_t uuid;
 	char ip[INET_ADDRSTRLEN];
 	char hex[NODE_ID_HEX_SIZE];
-	int fd;
 
-	if(!conf_path)
-		return 0;
-
-	node_config_load(conf_path, &cfg);
-
-	if (!node_uuid_random(&uuid) || !node_id_generate(cfg.ipv4, cfg.port, &uuid, &peer->node_id)) {
-    	fprintf(stderr, "peer_init: failed to generate NodeID\n");
-    	return 0;
-  	}
-
-	if((!inet_ntop(AF_INET, &cfg.ipv4, ip, sizeof(ip))) || (!node_id_to_hex(&peer->node_id, hex, sizeof(hex)))){
+	if (!peer || !conf_path) {
 		return 0;
 	}
 
+	if (!node_config_load(conf_path, &cfg)) {
+		fprintf(stderr, "peer_init: failed to load %s\n", conf_path);
+		return 0;
+	}
+	if (cfg.node_type != PEER) {
+		fprintf(stderr, "peer_init: type must be peer\n");
+		return 0;
+	}
+
+	if (!node_uuid_random(&uuid) || !node_id_generate(cfg.ipv4, cfg.port, &uuid, &peer->node_id)) {
+		fprintf(stderr, "peer_init: failed to generate NodeID\n");
+		return 0;
+	}
+
+	if (!inet_ntop(AF_INET, &cfg.ipv4, ip, sizeof ip) ||
+	    !node_id_to_hex(&peer->node_id, hex, sizeof hex)) {
+		return 0;
+	}
+	printf("NodeID: %s\n", hex);
 	fflush(stdout);
-	
+
 	peer->ipv4 = cfg.ipv4;
 	peer->port = cfg.port;
-	peer->type = PEER;
-
+	peer->type = cfg.node_type;
 	return 1;
-
 }
 
 int main(int argc, char* argv[]){
@@ -125,43 +131,41 @@ int main(int argc, char* argv[]){
     }
 
     peer_t self;
-    if (!peer_init(&self, "config/peer.conf"))
+    if (!peer_init(&self, "config/peer1.conf"))
         return 1;
 
     int fd = net_connect(host, (uint16_t)port);
     if (fd < 0)
         return 1;
 
-    pl_header h;
-    memset(&h, 0, sizeof h);
-    h.protocol_ver = PROTOCOL_VER;
-    h.msg_type     = (uint16_t)type;
-    h.time         = (uint64_t)time(NULL);
-    h.pl_size      = (uint32_t)payload_size_for((uint16_t)type);
-    memcpy(h.src_node, self.node_id.bytes, NODE_ID_SIZE);
-
     char buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
     int rc;
 
     switch (type) {
-    case PING:
+    case PING: {
+        pl_header h;
+        memset(&h, 0, sizeof h);
+        h.protocol_ver = PROTOCOL_VER;
+        h.msg_type = PING;
+        h.time = (uint64_t)time(NULL);
+        h.pl_size = 0;
+        memcpy(h.src_node, self.node_id.bytes, NODE_ID_SIZE);
         rc = send_message(fd, buf, NULL, &h);
         break;
+    }
     case JOIN: {
         join_t j;
         memset(&j, 0, sizeof j);
-        memcpy(j.node_id, self.node_id.bytes, NODE_ID_SIZE);
-        j.ipv4      = self.ipv4;
-        j.port      = self.port;
-        j.node_type = PEER;
-        rc = send_message(fd, buf, &j, &h);
+        j.ipv4 = self.ipv4;
+        j.port = self.port;
+        j.node_type = self.type;
+        rc = send_join(fd, &self.node_id, &j);
         break;
     }
     case LEAVE: {
         leave_t l;
         memset(&l, 0, sizeof l);
-        memcpy(l.node_id, self.node_id.bytes, NODE_ID_SIZE);
-        rc = send_message(fd, buf, &l, &h);
+        rc = send_leave(fd, &self.node_id, &l);
         break;
     }
     default:
