@@ -248,4 +248,5 @@ int send_error(int fd, const pl_header *req, const node_id_t *self, uint32_t cod
  * @return Bytes do payload (0 para PING/PONG), ou @c -1 se @p t estiver fora de faixa.
  */
 int32_t payload_size_for(uint16_t t);
+
 #endif

@@ -5,6 +5,7 @@
 #include "common/node.h"
 #include "common/protocol.h"
 
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,6 +60,7 @@ typedef struct {
   member_table_t members;            /**< Membership local. */
   int listend_fd;                    /**< fd de `net_listen`, ou -1. */
   char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
+  pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
 } superpeer_t;
 
 /**
@@ -133,11 +135,12 @@ int superpeer_handle_join(superpeer_t *sp, const pl_header *hdr, const join_t *j
 int superpeer_handle_leave(superpeer_t *sp, const pl_header *hdr, const leave_t *leave, ack_t *ack);
 
 /**
- * @brief Loop de `net_accept` + `recv_message`.
+ * @brief Loop de `net_accept`: cada conexão vai para uma thread destacada (sem pool).
  * @param sp Super Peer já inicializado (`listend_fd` válido).
  * @return 0 se @p sp ou o listen fd for inválido. Não retorna no caminho feliz.
  * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK.
  *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder. Outros tipos: ERROR 3.
+ *       Se `pthread_create` falhar, a conexão é tratada na thread de accept.
  */
 int superpeer_run(superpeer_t *sp);
 
