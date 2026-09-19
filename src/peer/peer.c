@@ -1,3 +1,9 @@
+/*
+ * peer.c — cliente P2P de linha de comando (CP1).
+ * Carrega a config, gera o NodeID, conecta a um Super Peer, envia uma mensagem
+ * de controle (ping/join/leave) e imprime a resposta. Exercita a ponta cliente
+ * do protocolo definido em protocol.c/network.c.
+ */
 #include "../../include/common/network.h"
 #include "../../include/common/protocol.h"
 #include "../../include/common/node.h"
@@ -19,6 +25,7 @@ typedef struct {
 } cmd_entry_t;
 
 
+/* Comandos aceitos na CLI mapeados para o tipo de mensagem correspondente. */
 static const cmd_entry_t cmd_table[] = {
     { "ping",  PING  },
     { "join",  JOIN  },
@@ -42,6 +49,7 @@ typedef struct peer_t{
 	node_type_t type;
 }peer_t;
 
+/* Carrega o .conf, gera UUID+NodeID e preenche o peer_t. Retorna 1 em sucesso. */
 int peer_init(peer_t* peer, const char *conf_path){
 	node_config_t cfg;
 	node_uuid_t uuid;
@@ -138,6 +146,7 @@ int main(int argc, char* argv[]){
     if (fd < 0)
         return 1;
 
+    /* Monta o payload conforme o comando e envia via send_message. */
     char buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
     int rc;
 
@@ -179,6 +188,7 @@ int main(int argc, char* argv[]){
     }
     printf("TX %s\n", message_type_name((uint16_t)type));
 
+    /* Le a resposta (ACK/ERROR/...) e imprime o tipo recebido. */
     char reply_payload[MAX_CONTROL_PAYLOAD_SZ];
     char reply_struct[sizeof(ack_t) > sizeof(error_t)
                       ? sizeof(ack_t) : sizeof(error_t)];
