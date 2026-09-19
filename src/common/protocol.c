@@ -470,11 +470,25 @@ void fill_reply_header(pl_header *out, const pl_header *in, const node_id_t *sel
 	out->pl_size = pl_size;
 }
 
+/* Monta um header de origem: gera TransactionID e deixa dst_node zerado. */
 static int fill_origin_header(pl_header *out, const node_id_t *self, uint16_t msg_type, uint32_t pl_size) {
 	node_uuid_t trsc;
 
-/* Atalho: responde LEAVE ecoando o TransactionID de req. */
-int send_leave(int fd, const pl_header *req, const node_id_t *self, const leave_t *leave){
+	if (!out || !self || !node_uuid_random(&trsc)) {
+		return 0;
+	}
+	memset(out, 0, sizeof *out);
+	out->protocol_ver = PROTOCOL_VER;
+	out->msg_type = msg_type;
+	memcpy(out->src_node, self->bytes, NODE_ID_SIZE);
+	memcpy(out->trsc_id, trsc.bytes, NODE_UUID_SIZE);
+	out->time = (uint64_t)time(NULL);
+	out->pl_size = pl_size;
+	return 1;
+}
+
+/* Atalho: envia LEAVE como mensagem de origem (TransactionID novo). */
+int send_leave(int fd, const node_id_t *self, const leave_t *leave){
 	char buf[HEADER_SIZE + payload_sizes[LEAVE]];
 	pl_header hdr;
 	leave_t body;
@@ -494,8 +508,8 @@ int send_leave(int fd, const pl_header *req, const node_id_t *self, const leave_
 	return send_message(fd, buf, &body, &hdr);
 }
 
-/* Atalho: responde JOIN ecoando o TransactionID de req. */
-int send_join(int fd, const pl_header *req, const node_id_t *self, const join_t *join){
+/* Atalho: envia JOIN como mensagem de origem (TransactionID novo). */
+int send_join(int fd, const node_id_t *self, const join_t *join){
 	char buf[HEADER_SIZE + payload_sizes[JOIN]];
 	pl_header hdr;
 	join_t body;
