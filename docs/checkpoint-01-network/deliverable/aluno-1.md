@@ -120,7 +120,7 @@ make
 
 Saída real da suíte (compilação + execução em 18/09/2026):
 
-```
+```text
 $ cd tests/c1 && make
 gcc -Wall -Wextra -pedantic -I../../include -I../../tests test_protocol.c \
     ../../src/common/protocol.c ../../src/common/network.c \

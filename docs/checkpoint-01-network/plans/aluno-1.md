@@ -125,7 +125,7 @@ CRC32 via `zlib` (`crc32`), calculado **sobre o payload** (não sobre o header).
 
 Processo CLI que valida a ponta cliente do protocolo:
 
-```
+```sh
 ./peer --cmd <ping|join|leave> --host <ip> --port <porta>
 ```
 

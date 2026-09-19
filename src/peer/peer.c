@@ -146,15 +146,6 @@ int main(int argc, char* argv[]){
     if (fd < 0)
         return 1;
 
-    /* Header comum: versao, tipo, origem, timestamp e tamanho do payload. */
-    pl_header h;
-    memset(&h, 0, sizeof h);
-    h.protocol_ver = PROTOCOL_VER;
-    h.msg_type     = (uint16_t)type;
-    h.time         = (uint64_t)time(NULL);
-    h.pl_size      = (uint32_t)payload_size_for((uint16_t)type);
-    memcpy(h.src_node, self.node_id.bytes, NODE_ID_SIZE);
-
     /* Monta o payload conforme o comando e envia via send_message. */
     char buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
     int rc;

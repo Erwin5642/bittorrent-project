@@ -488,8 +488,8 @@ static int fill_origin_header(pl_header *out, const node_id_t *self, uint16_t ms
 }
 
 /* Atalho: envia LEAVE como mensagem de origem (TransactionID novo). */
-int send_leave(int fd, const node_id_t *self, const leave_t *leave){
-	char buf[HEADER_SIZE + payload_sizes[LEAVE]];
+int send_leave(int fd, const node_id_t *self, const leave_t *leave) {
+	char buf[HEADER_SIZE + 32];
 	pl_header hdr;
 	leave_t body;
 	uint8_t zero_id[NODE_ID_SIZE];
@@ -509,8 +509,8 @@ int send_leave(int fd, const node_id_t *self, const leave_t *leave){
 }
 
 /* Atalho: envia JOIN como mensagem de origem (TransactionID novo). */
-int send_join(int fd, const node_id_t *self, const join_t *join){
-	char buf[HEADER_SIZE + payload_sizes[JOIN]];
+int send_join(int fd, const node_id_t *self, const join_t *join) {
+	char buf[HEADER_SIZE + 39];
 	pl_header hdr;
 	join_t body;
 
