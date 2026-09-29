@@ -54,22 +54,6 @@ enum message_type{
 };
 
 /**
- * @brief Algoritmo de compressão de um objeto (CP2).
- */
-typedef enum compression_type{
-	LZ4,  /**< Compressão LZ4. */
-}compress_type;
-
-/**
- * @brief Estado de um metadado no ciclo de replicação (CP2/CP5).
- */
-typedef enum metadata_status{
-	ACTIVE,       /**< Ativo e disponível. */
-	REPLICATING,  /**< Em replicação. */
-	REMOVED,      /**< Removido logicamente. */
-}mtdata_status;
-
-/**
  * @brief Nome legível de um tipo de mensagem, para log.
  * @param t Valor de @c message_type.
  * @return String estática (ex.: "JOIN"); "UNKNOWN" se fora de faixa.
@@ -93,25 +77,6 @@ typedef struct payloadHeader{
 	uint32_t pl_size;      /**< Bytes de payload após o header. */
 	uint32_t checksum;     /**< CRC32 do payload. */
 }pl_header;
-
-/**
- * @brief Metadado de um objeto na Hash Table distribuída (CP2).
- */
-typedef struct file_metadata{
-	uint8_t obj_id[32];          /**< ObjectID = SHA-256 do conteúdo. */
-	char* file_name;             /**< Nome do arquivo. */
-	uint64_t version;            /**< Versão do metadado. */
-	uint64_t size;               /**< Tamanho em bytes. */
-	compress_type compression;   /**< Algoritmo de compressão. */
-	uint8_t owner_peer[32];      /**< NodeID do dono. */
-	uint8_t* replica_peers[32];  /**< NodeIDs das réplicas. */
-	uint32_t chunk_count;        /**< Número de chunks. */
-	uint8_t* chunk_hash[32];     /**< Hash de cada chunk. */
-	uint64_t upload_date;        /**< Data de upload. */
-	uint64_t last_access;        /**< Último acesso (LFU). */
-	uint64_t download_counter;   /**< Contador de downloads (LFU). */
-	mtdata_status status;        /**< Estado do metadado. */
-}fl_mtdata;
 
 /**
  * @brief Resultado de um @c recv: header, payload desserializado e status.
