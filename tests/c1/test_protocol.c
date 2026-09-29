@@ -5,11 +5,11 @@
 #include <stdint.h>
 #include <string.h>
 
-int pack_header(const pl_header *in_st, char *out_st);
-int unpack_header(pl_header *out_st, const char *in_msg);
-int pack_join(const join_t *in_st, char *out_msg);
-int pack_ack(const ack_t *in_st, char *out_msg);
-int pack_error(const error_t *in_st, char *out_msg);
+int pack_header(const pl_header *in_st, uint8_t *out_st);
+int unpack_header(pl_header *out_st, const uint8_t *in_msg);
+int pack_join(const join_t *in_st, uint8_t *out_msg);
+int pack_ack(const ack_t *in_st, uint8_t *out_msg);
+int pack_error(const error_t *in_st, uint8_t *out_msg);
 
 /**
  * @file test_protocol.c
@@ -34,7 +34,7 @@ static void test_message_types(void) {
 static void test_pack_unpack_header(void) {
   pl_header in;
   pl_header out;
-  char wire[HEADER_SIZE];
+  uint8_t wire[HEADER_SIZE];
   uint16_t type_be;
 
   memset(&in, 0, sizeof in);
@@ -48,7 +48,7 @@ static void test_pack_unpack_header(void) {
   in.checksum = 0;
 
   expect(pack_header(&in, wire) == 0, "pack_header");
-  expect((uint8_t)wire[0] == PROTOCOL_VER, "byte 0 é protocol_ver");
+  expect(wire[0] == PROTOCOL_VER, "byte 0 é protocol_ver");
   memcpy(&type_be, wire + 1, sizeof type_be);
   expect(ntohs(type_be) == PING, "bytes 1-2 são msg_type em network order");
 
@@ -67,9 +67,9 @@ static void test_payload_wire_sizes(void) {
   join_t join;
   ack_t ack;
   error_t err;
-  char join_buf[39];
-  char ack_buf[32];
-  char err_buf[68];
+  uint8_t join_buf[39];
+  uint8_t ack_buf[32];
+  uint8_t err_buf[68];
 
   memset(&join, 0, sizeof join);
   memset(&ack, 0, sizeof ack);

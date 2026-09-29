@@ -19,6 +19,8 @@
 #define NET_OK 0
 /** Conexão fechada pelo peer remoto (EOF em @c recv). */
 #define NET_CLOSED 1
+/** CRC32 do payload não confere; a mensagem foi descartada. */
+#define NET_CORRUPTED_MSG 2
 
 /**
  * @brief Abre um socket TCP passivo (servidor).
@@ -56,20 +58,26 @@ int net_close(int fd);
 
 /**
  * @brief Envia @p buf_size bytes por completo, tratando @c send parcial.
+ *
+ * Repete a chamada se ela for interrompida por sinal (@c EINTR). Usa
+ * @c MSG_NOSIGNAL para que um peer fechado devolva @c EPIPE em vez de
+ * encerrar o processo com @c SIGPIPE.
  * @param fd Socket conectado.
  * @param buffer Bytes a enviar.
  * @param buf_size Quantidade de bytes.
  * @return @c NET_OK se tudo foi enviado, @c NET_ERROR em erro.
  */
-int send_all(int fd, const char* buffer, uint32_t buf_size);
+int send_all(int fd, const uint8_t* buffer, uint32_t buf_size);
 
 /**
  * @brief Recebe exatamente @p buf_size bytes, tratando @c recv parcial.
+ *
+ * Repete a chamada se ela for interrompida por sinal (@c EINTR).
  * @param fd Socket conectado.
  * @param buffer Destino; o caller aloca ao menos @p buf_size bytes.
  * @param buf_size Quantidade exata de bytes a ler.
  * @return @c NET_OK se leu tudo, @c NET_CLOSED se o remoto fechou, @c NET_ERROR em erro.
  */
-int recv_all(int fd, char* buffer, uint32_t buf_size);
+int recv_all(int fd, uint8_t* buffer, uint32_t buf_size);
 
 #endif

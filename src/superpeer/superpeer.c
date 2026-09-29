@@ -11,7 +11,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <pthread.h>
+
+#define SUPERPEER_MAX_CONNS 64
+/** Tempo máximo de send/recv por conexão aceita, em segundos. */
+#define NET_IO_TIMEOUT_SEC 5
+
+static int net_set_io_timeout(int fd, int seconds) {
+  struct timeval tv;
+
+  tv.tv_sec = seconds;
+  tv.tv_usec = 0;
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0) {
+    perror("net_set_io_timeout:SO_RCVTIMEO");
+    return -1;
+  }
+  if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
+    perror("net_set_io_timeout:SO_SNDTIMEO");
+    return -1;
+  }
+  return 0;
+}
 
 void member_table_init(member_table_t *table) {
   if (!table) {
@@ -157,9 +180,15 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     fprintf(stderr, "superpeer_init: failed to init mutex\n");
     return 0;
   }
+  if (pthread_mutex_init(&sp->conn_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init conn mutex\n");
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
 
   fd = net_listen(cfg.port);
   if (fd < 0) {
+    pthread_mutex_destroy(&sp->conn_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
@@ -256,14 +285,42 @@ int superpeer_handle_leave(superpeer_t *sp, const pl_header *hdr, const leave_t 
 }
 
 static int send_pong(int fd, const pl_header *req, const node_id_t *self) {
-  char buf[HEADER_SIZE];
+  uint8_t buf[HEADER_SIZE];
   pl_header hdr;
 
   if (!req || !self) {
     return NET_ERROR;
   }
   fill_reply_header(&hdr, req, self, PONG, 0);
-  return send_message(fd, buf, NULL, &hdr);
+  return send_message(fd, buf, sizeof buf, NULL, &hdr);
+}
+
+static void sleep_ms(unsigned ms) {
+  struct timespec ts;
+
+  ts.tv_sec = ms / 1000;
+  ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+  nanosleep(&ts, NULL);
+}
+
+static int conn_acquire(superpeer_t *sp) {
+  int ok;
+
+  pthread_mutex_lock(&sp->conn_lock);
+  ok = sp->active_conns < SUPERPEER_MAX_CONNS;
+  if (ok) {
+    sp->active_conns++;
+  }
+  pthread_mutex_unlock(&sp->conn_lock);
+  return ok;
+}
+
+static void conn_release(superpeer_t *sp) {
+  pthread_mutex_lock(&sp->conn_lock);
+  if (sp->active_conns > 0) {
+    sp->active_conns--;
+  }
+  pthread_mutex_unlock(&sp->conn_lock);
 }
 
 typedef struct {
@@ -272,16 +329,20 @@ typedef struct {
   struct sockaddr_in peer_addr;
 } conn_job_t;
 
+typedef union {
+  join_t join;
+  leave_t leave;
+  ack_t ack;
+  error_t error;
+} control_payload_t;
+
 static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer_addr) {
-  char in_buf[MAX_CONTROL_PAYLOAD_SZ];
-  union {
-    join_t join;
-    leave_t leave;
-  } payload;
+  uint8_t in_buf[MAX_CONTROL_PAYLOAD_SZ];
+  control_payload_t payload;
   msg_t msg;
 
   memset(&payload, 0, sizeof payload);
-  msg = recv_message(conn, in_buf, &payload);
+  msg = recv_message(conn, in_buf, sizeof in_buf, &payload, sizeof payload);
   if (msg.status != NET_OK) {
     net_close(conn);
     return;
@@ -298,9 +359,6 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
 
     if (payload.join.ipv4 == 0) {
       payload.join.ipv4 = peer_addr.sin_addr.s_addr;
-    }
-    if (payload.join.port == 0) {
-      payload.join.port = ntohs(peer_addr.sin_port);
     }
 
     memset(&ack, 0, sizeof ack);
@@ -339,6 +397,7 @@ static void *connection_worker(void *arg) {
   conn_job_t *job = arg;
 
   handle_connection(job->sp, job->conn, job->peer_addr);
+  conn_release(job->sp);
   free(job);
   return NULL;
 }
@@ -353,12 +412,25 @@ int superpeer_run(superpeer_t *sp) {
     conn_job_t *job = malloc(sizeof *job);
 
     if (!job) {
+      sleep_ms(50);
       continue;
     }
     job->sp = sp;
     memset(&job->peer_addr, 0, sizeof job->peer_addr);
     job->conn = net_accept(sp->listend_fd, &job->peer_addr);
     if (job->conn < 0) {
+      free(job);
+      sleep_ms(50);
+      continue;
+    }
+    if (!conn_acquire(sp)) {
+      net_close(job->conn);
+      free(job);
+      continue;
+    }
+    if (net_set_io_timeout(job->conn, NET_IO_TIMEOUT_SEC) != 0) {
+      net_close(job->conn);
+      conn_release(sp);
       free(job);
       continue;
     }

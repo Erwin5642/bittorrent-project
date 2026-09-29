@@ -1,6 +1,7 @@
 #include "../../include/superpeer/superpeer.h"
 
 #include <getopt.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -24,6 +25,8 @@ int main(int argc, char **argv) {
       {NULL, 0, NULL, 0},
   };
 
+  /* Vale para todas as threads: send em socket fechado nao derruba o processo. */
+  signal(SIGPIPE, SIG_IGN);
   setvbuf(stdout, NULL, _IONBF, 0);
 
   if (argc == 2 && argv[1][0] != '-') {

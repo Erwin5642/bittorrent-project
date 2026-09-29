@@ -61,6 +61,8 @@ typedef struct {
   int listend_fd;                    /**< fd de `net_listen`, ou -1. */
   char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
+  int active_conns;                  /**< Conexões em tratamento agora. */
+  pthread_mutex_t conn_lock;         /**< Protege @c active_conns. */
 } superpeer_t;
 
 /**
@@ -140,7 +142,9 @@ int superpeer_handle_leave(superpeer_t *sp, const pl_header *hdr, const leave_t 
  * @return 0 se @p sp ou o listen fd for inválido. Não retorna no caminho feliz.
  * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK.
  *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder. Outros tipos: ERROR 3.
- *       Se `pthread_create` falhar, a conexão é tratada na thread de accept.
+ *       No máximo 64 conexões em tratamento; acima disso o fd novo é fechado.
+ *       Cada conexão aceita recebe @c NET_IO_TIMEOUT_SEC. Se `pthread_create` falhar,
+ *       a conexão é tratada na thread de accept.
  */
 int superpeer_run(superpeer_t *sp);
 

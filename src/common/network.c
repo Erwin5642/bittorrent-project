@@ -1,9 +1,11 @@
+#define _GNU_SOURCE
 /*
  * network.c — camada de sockets IPv4/TCP e I/O de stream.
  * Encapsula socket/bind/listen/accept/connect/send/recv para que o resto do
  * sistema não os chame direto. send_all/recv_all garantem transferência
  * completa; o framing de mensagem fica em protocol.c.
  */
+#include<errno.h>
 #include<stdint.h>
 #include<stdio.h>
 #include<unistd.h>
@@ -104,20 +106,19 @@ int net_close(int fd){
 }
 
 
-#define NET_ERROR -1
-#define NET_OK 0
-#define NET_CLOSED 1
-
 /* Envia buf_size bytes por completo, repetindo send ate esvaziar o buffer. */
-int send_all(int fd, const char* buffer, uint32_t buf_size){
+int send_all(int fd, const uint8_t* buffer, uint32_t buf_size){
 	uint32_t remaining = buf_size;
 	ssize_t sent;
-	const char* ptr = buffer;
+	const uint8_t* ptr = buffer;
 
 	/* send pode enviar menos que o pedido: avanca o ponteiro e insiste. */
 	while(remaining > 0){
 
-		if((sent = send(fd, ptr, remaining, 0))<0){
+		/* MSG_NOSIGNAL: peer fechado devolve EPIPE em vez de matar o processo com SIGPIPE. */
+		if((sent = send(fd, ptr, remaining, MSG_NOSIGNAL))<0){
+			if(errno == EINTR)
+				continue;
 			perror("send_all:send");
 			return NET_ERROR;
 		}
@@ -129,15 +130,17 @@ int send_all(int fd, const char* buffer, uint32_t buf_size){
 }
 
 /* Recebe exatamente buf_size bytes; distingue EOF (NET_CLOSED) de erro. */
-int recv_all(int fd, char* buffer, uint32_t buf_size){
+int recv_all(int fd, uint8_t* buffer, uint32_t buf_size){
 	uint32_t remaining = buf_size;
 	ssize_t received;
-	char* ptr = buffer;
+	uint8_t* ptr = buffer;
 
 	while(remaining > 0){
 
 		if((received = recv(fd, ptr, remaining, 0))<=0){
 			if(received == 0) return NET_CLOSED; /* remoto fechou a conexao */
+			if(errno == EINTR)
+				continue;
 			perror("recv_all:received");
 			return NET_ERROR;
 		}
