@@ -4,6 +4,7 @@
 #include "node.h"
 
 #include <stdint.h>
+#include <sys/types.h>
 
 /**
  * @file protocol.h
@@ -155,15 +156,41 @@ typedef struct errorPayload{
 }error_t;
 
 /*
-int pack_join(const join_t* in_st, char* out_msg);
-int unpack_join(join_t* out_st, const char* in_msg);
-int pack_ack(const ack_t* in_st, char* out_msg);
-int unpack_ack(ack_t* out_st, const char* in_msg);
-int pack_error(const error_t* in_st, char* out_msg);
-int unpack_error(error_t* out_st, const char* in_msg);
-int unpack_header(pl_header* out_st, const char* in_msg);
-int pack_header(const pl_header* in_st, char* out_st);
+int pack_join(const join_t* in_st, uint8_t* out_msg);
+int unpack_join(join_t* out_st, const uint8_t* in_msg);
+int pack_ack(const ack_t* in_st, uint8_t* out_msg);
+int unpack_ack(ack_t* out_st, const uint8_t* in_msg);
+int pack_error(const error_t* in_st, uint8_t* out_msg);
+int unpack_error(error_t* out_st, const uint8_t* in_msg);
+int unpack_header(pl_header* out_st, const uint8_t* in_msg);
+int pack_header(const pl_header* in_st, uint8_t* out_st);
 */
+
+/**
+ * @brief Serializa header e payload de controle e grava o CRC32 do payload.
+ *
+ * Empacota o payload conforme @c hdr->msg_type, calcula o CRC32 desses bytes,
+ * preenche @c hdr->checksum e serializa o header no início de @p out_buf.
+ * @param out_buf Destino da mensagem completa.
+ * @param out_cap Capacidade de @p out_buf, em bytes. Precisa caber @c HEADER_SIZE + @c pl_size.
+ * @param payload Struct do payload (@c join_t, @c ack_t, ...) ou NULL para PING/PONG.
+ * @param hdr Header com @c msg_type e @c pl_size já definidos; @c checksum é preenchido aqui.
+ * @return Bytes escritos (@c HEADER_SIZE + payload), ou @c -1 se tipo, tamanho ou buffer forem inválidos.
+ */
+ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload, pl_header *hdr);
+
+/**
+ * @brief Desserializa uma mensagem já recebida: header, CRC32 e payload.
+ *
+ * Lê o header em @p in_buf, confere o CRC32 do payload e só então faz o unpack
+ * do tipo (@c JOIN, @c LEAVE, @c ACK, @c ERROR). PING/PONG não têm payload.
+ * @param in_buf Mensagem completa: @c HEADER_SIZE bytes de header e em seguida o payload.
+ * @param buf_len Bytes válidos em @p in_buf. Precisa cobrir @c HEADER_SIZE + @c pl_size.
+ * @param out_hdr Recebe o header; o caller aloca.
+ * @param out_payload Recebe o struct do tipo (@c join_t, ...). NULL em PING/PONG.
+ * @return @c NET_OK, @c NET_CORRUPTED_MSG se o CRC falhar, ou @c NET_ERROR.
+ */
+int deserialize_message(const uint8_t *in_buf, size_t buf_len, pl_header *out_hdr, void *out_payload);
 
 /**
  * @brief Serializa header+payload de controle e envia em um único @c send_all.
@@ -171,12 +198,14 @@ int pack_header(const pl_header* in_st, char* out_st);
  * Empacota o payload conforme @c msg_type, calcula o CRC32 do payload,
  * preenche @c checksum, serializa o header e envia @c HEADER_SIZE + @c pl_size bytes.
  * @param fd Socket conectado.
- * @param out_msg_buffer Buffer de trabalho; ao menos @c HEADER_SIZE + @c pl_size bytes.
+ * @param out_msg_buffer Buffer de trabalho.
+ * @param buf_size Capacidade de @p out_msg_buffer, em bytes. Precisa caber @c HEADER_SIZE + @c pl_size.
  * @param msg_payload Struct do payload (@c join_t, @c ack_t, ...) ou NULL para PING/PONG.
  * @param msg_header Header com @c msg_type e @c pl_size já definidos; @c checksum é preenchido aqui.
- * @return @c NET_OK em sucesso, @c NET_ERROR em tipo/tamanho inválido ou erro de envio.
+ * @return @c NET_OK em sucesso, @c NET_ERROR em tipo/tamanho inválido, buffer curto ou erro de envio.
  */
-int send_message(int fd, char* out_msg_buffer, const void* msg_payload, pl_header* msg_header);
+int send_message(int fd, uint8_t *out_msg_buffer, size_t buf_size, const void *msg_payload,
+                 pl_header *msg_header);
 
 /**
  * @brief Recebe header+payload de controle, valida e desserializa.
@@ -185,13 +214,16 @@ int send_message(int fd, char* out_msg_buffer, const void* msg_payload, pl_heade
  * valida o CRC32 e faz o unpack para @p struct_payload.
  * @param fd Socket conectado.
  * @param in_msg_buffer Buffer de trabalho para o payload cru.
- * @param struct_payload Destino do struct desserializado; o caller aloca.
- * @return @c msg_t com @c status @c NET_OK, @c NET_ERROR (versão/tipo/tamanho/CRC) ou @c NET_CLOSED.
+ * @param in_buf_size Capacidade de @p in_msg_buffer, em bytes. @c pl_size maior é rejeitado.
+ * @param struct_payload Destino do struct desserializado; o caller aloca. Ignorado em PING/PONG.
+ * @param struct_size Capacidade de @p struct_payload, em bytes. Precisa caber o struct do tipo recebido.
+ * @return @c msg_t com @c status @c NET_OK, @c NET_ERROR (versão/tipo/tamanho/CRC/buffer) ou @c NET_CLOSED.
  */
-msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload);
+msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size, void *struct_payload,
+                   size_t struct_size);
 
 /**
- * @brief Envia um header seguido de um payload de bytes arbitrário (string).
+ * @brief Envia um header seguido de um payload de bytes arbitrário.
  * @param fd Socket conectado.
  * @param out_msg_buffer Buffer de trabalho; ao menos @c HEADER_SIZE + @p str_size bytes.
  * @param payload Bytes do payload.
@@ -199,7 +231,7 @@ msg_t recv_message(int fd, char* in_msg_buffer, void* struct_payload);
  * @param msg_header Header com @c msg_type e @c pl_size; @c checksum é preenchido aqui.
  * @return @c NET_OK em sucesso, @c NET_ERROR em tipo/tamanho inválido ou erro de envio.
  */
-int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_size, pl_header* msg_header);
+int simple_send(int fd, uint8_t* out_msg_buffer, const uint8_t* payload, uint32_t str_size, pl_header* msg_header);
 
 /**
  * @brief Recebe um header seguido de um payload de bytes arbitrário, validando o CRC.
@@ -208,7 +240,7 @@ int simple_send(int fd, char* out_msg_buffer, const char* payload, uint32_t str_
  * @param str_size Capacidade de @p payload; @c pl_size maior é rejeitado.
  * @return @c msg_t com @c status @c NET_OK, @c NET_ERROR (tipo/tamanho/CRC) ou @c NET_CLOSED.
  */
-msg_t simple_recv(int fd, char* payload, uint32_t str_size);
+msg_t simple_recv(int fd, uint8_t* payload, uint32_t str_size);
 
 /**
  * @brief Monta um header de resposta: ecoa TransactionID, troca src/dst.

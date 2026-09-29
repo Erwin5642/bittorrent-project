@@ -10,6 +10,7 @@
 #include "../../include/common/config.h"
 
 #include <getopt.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,6 +90,9 @@ int peer_init(peer_t* peer, const char *conf_path){
 
 int main(int argc, char* argv[]){
 	const char *cmd  = NULL;
+
+	/* Peer fechado devolve EPIPE no send; nao mata o processo. */
+	signal(SIGPIPE, SIG_IGN);
     const char *host = "127.0.0.1";
     long port = 0;
 	
@@ -147,7 +151,7 @@ int main(int argc, char* argv[]){
         return 1;
 
     /* Monta o payload conforme o comando e envia via send_message. */
-    char buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+    uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
     int rc;
 
     switch (type) {
@@ -159,7 +163,7 @@ int main(int argc, char* argv[]){
         h.time = (uint64_t)time(NULL);
         h.pl_size = 0;
         memcpy(h.src_node, self.node_id.bytes, NODE_ID_SIZE);
-        rc = send_message(fd, buf, NULL, &h);
+        rc = send_message(fd, buf, sizeof buf, NULL, &h);
         break;
     }
     case JOIN: {
@@ -189,11 +193,12 @@ int main(int argc, char* argv[]){
     printf("TX %s\n", message_type_name((uint16_t)type));
 
     /* Le a resposta (ACK/ERROR/...) e imprime o tipo recebido. */
-    char reply_payload[MAX_CONTROL_PAYLOAD_SZ];
+    uint8_t reply_payload[MAX_CONTROL_PAYLOAD_SZ];
     char reply_struct[sizeof(ack_t) > sizeof(error_t)
                       ? sizeof(ack_t) : sizeof(error_t)];
 
-    msg_t r = recv_message(fd, reply_payload, reply_struct);
+    msg_t r = recv_message(fd, reply_payload, sizeof reply_payload, reply_struct,
+                           sizeof reply_struct);
     net_close(fd);
 
     if (r.status != NET_OK)
