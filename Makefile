@@ -23,15 +23,17 @@ TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node $(BIN_DIR)/client
 TEST_NODE = $(BIN_DIR)/test_node
 TEST_CONFIG = $(BIN_DIR)/test_config
 TEST_SUPERPEER = $(BIN_DIR)/test_superpeer
+TEST_STORAGE = $(BIN_DIR)/test_storage
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_STORAGE)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
+	$(TEST_STORAGE)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -57,6 +59,9 @@ $(BIN_DIR)/test_config: tests/common/test_config.c $(OBJ_DIR)/common/config.o $(
 
 $(BIN_DIR)/test_superpeer: tests/superpeer/test_superpeer.c $(SUPERPEER_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_storage: tests/peer/test_storage.c $(OBJ_DIR)/peer/storage.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
 
 # Compila tests/foo.c em obj/tests/foo.o
 $(OBJ_DIR)/tests/%.o: tests/%.c
