@@ -8,7 +8,7 @@
 
 /**
  * @file protocol.h
- * @brief Framing TCP, header padrão e payloads de controle (JOIN/PING/PONG/LEAVE/ACK/ERROR).
+ * @brief Framing TCP, header padrão, payloads de controle e o registro de metadata no fio.
  *
  * Toda mensagem no fio é @c HEADER_SIZE bytes de header (big-endian) seguidos de
  * @c pl_size bytes de payload. O header carrega um CRC32 do payload. A serialização
@@ -263,5 +263,92 @@ int send_leave(int fd, const node_id_t *self, const leave_t *leave);
  * @return Bytes do payload (0 para PING/PONG), ou @c -1 se @p t estiver fora de faixa.
  */
 int32_t payload_size_for(uint16_t t);
+
+/** Tamanho do ObjectID, em bytes. */
+#define METADATA_OBJECT_ID_SIZE 32
+
+/** Tamanho do hash de um chunk, em bytes. */
+#define METADATA_CHUNK_HASH_SIZE 32
+
+/** Nome lógico no fio, incluindo o NUL. No máximo 255 caracteres úteis. */
+#define METADATA_FILENAME_MAX 256
+
+/**
+ * @brief Teto do registro serializado, em bytes.
+ *
+ * Distinto do payload de controle (4096). Um registro de metadata cabe
+ * abaixo de um chunk de 4 MB.
+ */
+#define METADATA_PAYLOAD_MAX (64u * 1024u)
+
+/**
+ * @brief Prefixo fixo no fio, em bytes.
+ *
+ * object_id (32) + filename (256) + size (8) + chunk_count (4) +
+ * version (4) + owner (32) = 336. A cauda são @c chunk_count hashes.
+ */
+#define METADATA_WIRE_PREFIX 336
+
+/**
+ * @brief Metadata de um arquivo, no fio e na tabela do Super Peer.
+ *
+ * Corresponde ao `FileMetadata` do checkpoint. O dono é o NodeID de 32
+ * bytes já usado no JOIN. Os hashes formam um bloco contíguo, não um
+ * vetor de ponteiros.
+ */
+typedef struct {
+  uint8_t object_id[METADATA_OBJECT_ID_SIZE]; /**< ObjectID, 32 bytes crus. */
+  char filename[METADATA_FILENAME_MAX];       /**< Nome lógico, NUL-terminated. */
+  uint64_t size;                              /**< Tamanho do arquivo original, em bytes. */
+  uint32_t chunk_count;                       /**< Quantidade de hashes em @c chunk_hashes. */
+  uint32_t version;                           /**< Versão do registro. */
+  node_id_t owner;                            /**< NodeID de quem publicou. */
+  uint8_t *chunk_hashes;                      /**< @c chunk_count * 32 bytes, ou NULL se zero.
+                                                   SHA-256 do chunk original, antes do LZ4. */
+} file_metadata_t;
+
+/**
+ * @brief Tamanho no fio de um registro com @p chunk_count hashes.
+ * @param chunk_count Quantidade de chunks.
+ * @return @c METADATA_WIRE_PREFIX + hashes, ou 0 se passar de @c METADATA_PAYLOAD_MAX.
+ */
+size_t metadata_wire_size(uint32_t chunk_count);
+
+/**
+ * @brief Zera um registro. Não libera @c chunk_hashes.
+ * @param meta Destino; o caller aloca. NULL é ignorado.
+ */
+void metadata_init(file_metadata_t *meta);
+
+/**
+ * @brief Libera o bloco de hashes e zera o registro.
+ * @param meta Registro cuja memória de @c chunk_hashes pertence a quem chama.
+ */
+void metadata_release(file_metadata_t *meta);
+
+/**
+ * @brief Serializa um registro em big-endian, sem ponteiros.
+ *
+ * Prefixo de @c METADATA_WIRE_PREFIX bytes e, em seguida, os hashes na
+ * ordem dos chunks. Cada inteiro multibyte vai em network byte order.
+ * @param meta Registro de origem.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out, em bytes.
+ * @return Bytes escritos, ou -1 se o registro ou o buffer forem inválidos.
+ */
+ssize_t metadata_pack(const file_metadata_t *meta, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Reconstrói um registro a partir do layout de @c metadata_pack.
+ *
+ * Aloca @c chunk_hashes quando @c chunk_count é maior que zero. O chamador
+ * libera com @c metadata_release. ObjectID zerado, nome vazio ou cauda que
+ * não fecha com @c chunk_count falham sem deixar memória pendente.
+ * @param out Destino; o caller aloca o struct.
+ * @param in Bytes do payload, sem o header de mensagem.
+ * @param in_len Tamanho de @p in. Tem de ser igual ao tamanho calculado por @c chunk_count.
+ * @return 1 em sucesso, 0 se o buffer, o nome ou a cauda forem inválidos.
+ */
+int metadata_unpack(file_metadata_t *out, const uint8_t *in, size_t in_len);
 
 #endif
