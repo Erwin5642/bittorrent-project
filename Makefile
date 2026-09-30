@@ -27,17 +27,19 @@ TEST_CONFIG = $(BIN_DIR)/test_config
 TEST_SUPERPEER = $(BIN_DIR)/test_superpeer
 TEST_METADATA = $(BIN_DIR)/test_metadata
 TEST_COMPRESSION = $(BIN_DIR)/test_compression
+TEST_FILE_PIPELINE = $(BIN_DIR)/test_file_pipeline
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
 	$(TEST_METADATA)
 	$(TEST_COMPRESSION)
+	$(TEST_FILE_PIPELINE)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -68,6 +70,9 @@ $(BIN_DIR)/test_metadata: tests/superpeer/test_metadata.c $(METADATA_OBJ) $(COMM
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_compression: tests/common/test_compression.c $(OBJ_DIR)/common/compression.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_file_pipeline: tests/peer/test_file_pipeline.c $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compila tests/foo.c em obj/tests/foo.o
