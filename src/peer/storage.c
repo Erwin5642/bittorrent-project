@@ -146,3 +146,67 @@ long storage_chunk_size(const char *root, const uint8_t object_id[NODE_ID_SIZE],
 		return -1;
 	return (long)st.st_size;
 }
+
+/* Caminho do metadado indexado por nome; recusa nome com '/'. */
+static int storage_meta_path(char *out, size_t out_cap, const char *root, const char *name) {
+	int n;
+
+	if (!out || !root || !name || name[0] == '\0' || strchr(name, '/'))
+		return 0;
+	n = snprintf(out, out_cap, "%s/index/%s.meta", root, name);
+	if (n < 0 || (size_t)n >= out_cap)
+		return 0;
+	return 1;
+}
+
+int storage_put_meta(const char *root, const char *name, const uint8_t *data, size_t len) {
+	char dir[STORAGE_PATH_MAX];
+	char path[STORAGE_PATH_MAX];
+	FILE *fp;
+	int n;
+
+	if (!root || (len > 0 && !data))
+		return 0;
+	if (!storage_meta_path(path, sizeof path, root, name))
+		return 0;
+	n = snprintf(dir, sizeof dir, "%s/index", root);
+	if (n < 0 || (size_t)n >= sizeof dir)
+		return 0;
+
+	if (!mkdir_ok(root) || !mkdir_ok(dir))
+		return 0;
+
+	fp = fopen(path, "wb");
+	if (!fp)
+		return 0;
+	if (len > 0 && fwrite(data, 1, len, fp) != len) {
+		fclose(fp);
+		return 0;
+	}
+	return fclose(fp) == 0;
+}
+
+int storage_get_meta(const char *root, const char *name, uint8_t *out, size_t out_cap,
+                     size_t *out_len) {
+	char path[STORAGE_PATH_MAX];
+	FILE *fp;
+	long size;
+	int rc = 0;
+
+	if (!out || !out_len || !storage_meta_path(path, sizeof path, root, name))
+		return 0;
+
+	fp = fopen(path, "rb");
+	if (!fp)
+		return 0;
+	if (fseek(fp, 0, SEEK_END) != 0 || (size = ftell(fp)) < 0 ||
+	    (size_t)size > out_cap || fseek(fp, 0, SEEK_SET) != 0)
+		goto done;
+	if (size > 0 && fread(out, 1, (size_t)size, fp) != (size_t)size)
+		goto done;
+	*out_len = (size_t)size;
+	rc = 1;
+done:
+	fclose(fp);
+	return rc;
+}
