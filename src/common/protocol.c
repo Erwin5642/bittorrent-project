@@ -550,7 +550,8 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case ERROR: unpack_rc = unpack_error(out_payload, payload_area); break;
     case PING:
     case PONG:
-        break;
+    case STORE:
+        break;                      /* payload variável; o handler desserializa */
     default:
         return NET_ERROR;
     }
