@@ -149,7 +149,7 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
  *
  * Lê o header em @p in_buf, confere o CRC32 do payload e só então faz o unpack
  * do tipo (@c JOIN, @c LEAVE, @c ACK, @c ERROR). PING/PONG não têm payload.
- * @c STORE passa com o payload cru: o handler desserializa.
+ * @c STORE e @c LOOKUP passam com o payload cru: o handler desserializa.
  * @param in_buf Mensagem completa: @c HEADER_SIZE bytes de header e em seguida o payload.
  * @param buf_len Bytes válidos em @p in_buf. Precisa cobrir @c HEADER_SIZE + @c pl_size.
  * @param out_hdr Recebe o header; o caller aloca.

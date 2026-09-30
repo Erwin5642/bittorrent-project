@@ -550,8 +550,10 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case ERROR: unpack_rc = unpack_error(out_payload, payload_area); break;
     case PING:
     case PONG:
+        break;
     case STORE:
-        break;                      /* payload variável; o handler desserializa */
+    case LOOKUP:
+        break;   /* payload variavel; o handler desserializa (ex.: metadata_unpack) */
     default:
         return NET_ERROR;
     }
@@ -607,7 +609,17 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 		return (msg_t){{0}, NULL, NET_ERROR};
 	}
 
-	/* Tipos de payload variavel (CP2+) ficam fora da validacao de tamanho fixo. */
+	/*
+	 * Tipos de payload variavel (CP2+) ficam fora da validacao de tamanho fixo.
+	 * STORE/LOOKUP cabem no teto de controle e entram por este ramo (payload lido
+	 * e copiado; deserialize_message desserializa).
+	 *
+	 * BUG conhecido (contrato C5, a corrigir antes do download): DOWNLOAD_REQ,
+	 * DOWNLOAD_REP, GOSSIP, STATE_TRANSFER e SNAPSHOT sao pulados aqui e a funcao
+	 * retorna NET_OK sem ler os pl_size bytes do socket, dessincronizando o stream.
+	 * O conserto depende do design de payload grande (>MAX_CONTROL_PAYLOAD_SZ),
+	 * que vem junto com a transferencia de chunks.
+	 */
 	if(message_type != DOWNLOAD_REP && message_type != DOWNLOAD_REQ &&  message_type != GOSSIP && message_type != STATE_TRANSFER && message_type != SNAPSHOT){
 		if (payload_size > MAX_CONTROL_PAYLOAD_SZ ||
 		    (payload_sizes[message_type] >= 0 &&

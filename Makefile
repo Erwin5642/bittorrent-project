@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests -pthread
-LDFLAGS = -lcrypto -lz -pthread
+LDFLAGS = -lcrypto -lz -llz4 -pthread
 
 BIN_DIR = bin
 OBJ_DIR = obj
@@ -13,7 +13,8 @@ COMMON_OBJS = \
 	$(OBJ_DIR)/common/node.o \
 	$(OBJ_DIR)/common/config.o \
 	$(OBJ_DIR)/common/network.o \
-	$(OBJ_DIR)/common/protocol.o
+	$(OBJ_DIR)/common/protocol.o \
+	$(OBJ_DIR)/common/compression.o
 SUPERPEER_OBJ = $(OBJ_DIR)/superpeer/superpeer.o
 METADATA_OBJ = $(OBJ_DIR)/superpeer/metadata.o
 SUPERPEER_MAIN_OBJ = $(OBJ_DIR)/superpeer/main.o
@@ -25,16 +26,22 @@ TEST_NODE = $(BIN_DIR)/test_node
 TEST_CONFIG = $(BIN_DIR)/test_config
 TEST_SUPERPEER = $(BIN_DIR)/test_superpeer
 TEST_METADATA = $(BIN_DIR)/test_metadata
+TEST_COMPRESSION = $(BIN_DIR)/test_compression
+TEST_FILE_PIPELINE = $(BIN_DIR)/test_file_pipeline
+TEST_STORAGE = $(BIN_DIR)/test_storage
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
 	$(TEST_METADATA)
+	$(TEST_COMPRESSION)
+	$(TEST_FILE_PIPELINE)
+	$(TEST_STORAGE)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -63,6 +70,15 @@ $(BIN_DIR)/test_superpeer: tests/superpeer/test_superpeer.c $(SUPERPEER_OBJ) $(M
 
 $(BIN_DIR)/test_metadata: tests/superpeer/test_metadata.c $(METADATA_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_compression: tests/common/test_compression.c $(OBJ_DIR)/common/compression.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_file_pipeline: tests/peer/test_file_pipeline.c $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_storage: tests/peer/test_storage.c $(OBJ_DIR)/peer/storage.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
 
 # Compila tests/foo.c em obj/tests/foo.o
 $(OBJ_DIR)/tests/%.o: tests/%.c
