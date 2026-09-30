@@ -53,7 +53,7 @@ chunk **original, antes da compressão LZ4**.
 
 Isso decorre do fluxo de download da especificação:
 
-```
+```text
 Compressed Chunk → LZ4 Decode → SHA-256 → Validação → Entrega
 ```
 
