@@ -308,6 +308,20 @@ typedef struct {
 } file_metadata_t;
 
 /**
+ * @brief Diz se o ObjectID é 32 bytes zero.
+ * @param id Chave de 32 bytes.
+ * @return 1 se todos os bytes forem zero, 0 caso contrário.
+ */
+int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]);
+
+/**
+ * @brief Diz se o nome cabe no campo e não é vazio.
+ * @param filename Nome a validar. Pode ser NULL.
+ * @return 1 se houver ao menos um caractere e um NUL dentro de @c METADATA_FILENAME_MAX, 0 caso contrário.
+ */
+int metadata_name_ok(const char *filename);
+
+/**
  * @brief Tamanho no fio de um registro com @p chunk_count hashes.
  * @param chunk_count Quantidade de chunks.
  * @return @c METADATA_WIRE_PREFIX + hashes, ou 0 se passar de @c METADATA_PAYLOAD_MAX.

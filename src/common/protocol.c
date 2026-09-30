@@ -211,7 +211,7 @@ int unpack_leave(leave_t* out_st, const uint8_t* in_msg){
 }
 
 /* ObjectID zerado nao identifica arquivo. */
-static int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
+int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
 	size_t i;
 
 	for (i = 0; i < METADATA_OBJECT_ID_SIZE; i++) {
@@ -222,7 +222,7 @@ static int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
 }
 
 /* Nome logico: nao vazio e com NUL dentro dos 256 bytes do campo. */
-static int metadata_name_ok(const char *filename) {
+int metadata_name_ok(const char *filename) {
 	size_t i;
 
 	if (!filename || filename[0] == '\0')
@@ -551,6 +551,9 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case PING:
     case PONG:
         break;
+    case STORE:
+    case LOOKUP:
+        break;   /* payload variavel; o handler desserializa (ex.: metadata_unpack) */
     default:
         return NET_ERROR;
     }
@@ -606,7 +609,17 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 		return (msg_t){{0}, NULL, NET_ERROR};
 	}
 
-	/* Tipos de payload variavel (CP2+) ficam fora da validacao de tamanho fixo. */
+	/*
+	 * Tipos de payload variavel (CP2+) ficam fora da validacao de tamanho fixo.
+	 * STORE/LOOKUP cabem no teto de controle e entram por este ramo (payload lido
+	 * e copiado; deserialize_message desserializa).
+	 *
+	 * BUG conhecido (contrato C5, a corrigir antes do download): DOWNLOAD_REQ,
+	 * DOWNLOAD_REP, GOSSIP, STATE_TRANSFER e SNAPSHOT sao pulados aqui e a funcao
+	 * retorna NET_OK sem ler os pl_size bytes do socket, dessincronizando o stream.
+	 * O conserto depende do design de payload grande (>MAX_CONTROL_PAYLOAD_SZ),
+	 * que vem junto com a transferencia de chunks.
+	 */
 	if(message_type != DOWNLOAD_REP && message_type != DOWNLOAD_REQ &&  message_type != GOSSIP && message_type != STATE_TRANSFER && message_type != SNAPSHOT){
 		if (payload_size > MAX_CONTROL_PAYLOAD_SZ ||
 		    (payload_sizes[message_type] >= 0 &&
