@@ -211,7 +211,7 @@ int unpack_leave(leave_t* out_st, const uint8_t* in_msg){
 }
 
 /* ObjectID zerado nao identifica arquivo. */
-static int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
+int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
 	size_t i;
 
 	for (i = 0; i < METADATA_OBJECT_ID_SIZE; i++) {
@@ -222,7 +222,7 @@ static int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
 }
 
 /* Nome logico: nao vazio e com NUL dentro dos 256 bytes do campo. */
-static int metadata_name_ok(const char *filename) {
+int metadata_name_ok(const char *filename) {
 	size_t i;
 
 	if (!filename || filename[0] == '\0')
