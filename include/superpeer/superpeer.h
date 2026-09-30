@@ -4,6 +4,7 @@
 #include "common/config.h"
 #include "common/node.h"
 #include "common/protocol.h"
+#include "superpeer/metadata.h"
 
 #include <pthread.h>
 #include <stddef.h>
@@ -11,7 +12,7 @@
 
 /**
  * @file superpeer.h
- * @brief Processo Super Peer: membership local e ciclo de JOIN.
+ * @brief Processo Super Peer: membership local, índice de metadata e ciclo de JOIN.
  */
 
 /** Capacidade da tabela de membros em memória (sem persistência). */
@@ -58,9 +59,11 @@ typedef struct {
   node_config_t cfg;                 /**< Configuração lida do .conf. */
   node_id_t self_id;                 /**< NodeID deste Super Peer. */
   member_table_t members;            /**< Membership local. */
+  metadata_table_t metadata;         /**< Índice local por ObjectID. */
   int listend_fd;                    /**< fd de `net_listen`, ou -1. */
   char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
+  pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
 } superpeer_t;
 
 /**
@@ -107,9 +110,11 @@ void member_table_print(const member_table_t *table);
  * @param conf_path Caminho do arquivo (ex.: `config/sp1.conf`).
  * @param port Porta de listen; `0` usa a porta do .conf. Também entra no NodeID.
  * @param name Nome lógico para logs (`Node <name> started`); NULL vira `"superpeer"`.
- * @return 1 em sucesso, 0 se config, identidade, tabela ou bind falhar.
+ * @return 1 em sucesso, 0 se config, identidade, tabela, lock ou bind falhar.
  * @note Inclui o próprio nó como @c MEMBER_ALIVE. O bind usa @p port (ou a do
  *       .conf) em todas as interfaces; o `ip` da config só entra no NodeID.
+ *       A tabela de metadata começa vazia. @c metadata_lock é independente de
+ *       @c members_lock.
  */
 int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const char *name);
 
@@ -135,11 +140,30 @@ int superpeer_handle_join(superpeer_t *sp, const pl_header *hdr, const join_t *j
 int superpeer_handle_leave(superpeer_t *sp, const pl_header *hdr, const leave_t *leave, ack_t *ack);
 
 /**
+ * @brief Valida um STORE e grava o registro na tabela de metadata.
+ *
+ * O payload é o layout de @c metadata_pack, ainda cru. @c owner tem de ser o
+ * @c src_node do header. Tabela cheia numa inserção nova responde código 6.
+ * @param sp Estado do Super Peer.
+ * @param hdr Header da mensagem recebida.
+ * @param payload Bytes do registro, sem o header de mensagem.
+ * @param payload_len Tamanho de @p payload, em geral @c hdr->pl_size.
+ * @param ack Preenchido com o NodeID de quem publicou, se o STORE for aceito.
+ * @param err Preenchido se o STORE for rejeitado.
+ * @return 1 para responder ACK, 0 para responder ERROR.
+ * @note Quem chama segura @c metadata_lock. Sucesso imprime o registro em stdout
+ *       (`File`, `Size`, `ObjectID`, `Chunks`, `Chunk i`).
+ */
+int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t *payload,
+                           size_t payload_len, ack_t *ack, error_t *err);
+
+/**
  * @brief Loop de `net_accept`: cada conexão vai para uma thread destacada (sem pool).
  * @param sp Super Peer já inicializado (`listend_fd` válido).
  * @return 0 se @p sp ou o listen fd for inválido. Não retorna no caminho feliz.
- * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK.
- *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder. Outros tipos: ERROR 3.
+ * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK;
+ *       STORE → ACK/ERROR. Versão inválida ou @c NET_CLOSED: fecha o fd sem responder.
+ *       Outros tipos: ERROR 3.
  *       Sem limite de conexões simultâneas nem timeout de I/O (MVP). Se
  *       `pthread_create` falhar, a conexão é tratada na thread de accept.
  */

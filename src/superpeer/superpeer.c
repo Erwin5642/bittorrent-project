@@ -142,6 +142,7 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   fflush(stdout);
 
   member_table_init(&sp->members);
+  metadata_table_init(&sp->metadata);
   self.id = sp->self_id;
   self.ipv4 = cfg.ipv4;
   self.port = cfg.port;
@@ -158,8 +159,14 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     fprintf(stderr, "superpeer_init: failed to init mutex\n");
     return 0;
   }
+  if (pthread_mutex_init(&sp->metadata_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init metadata mutex\n");
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
   fd = net_listen(cfg.port);
   if (fd < 0) {
+    pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
@@ -230,6 +237,83 @@ int superpeer_handle_join(superpeer_t *sp, const pl_header *hdr, const join_t *j
   }
 
   memcpy(ack->node_id, jid.bytes, NODE_ID_SIZE);
+  return 1;
+}
+
+/* Saída de verificação do CP2: File, Size, ObjectID, Chunks, Chunk i. */
+static void metadata_record_print(const file_metadata_t *meta) {
+  node_id_t id;
+  char hex[NODE_ID_HEX_SIZE];
+  uint32_t i;
+
+  if (!meta) {
+    return;
+  }
+  memcpy(id.bytes, meta->object_id, NODE_ID_SIZE);
+  if (!node_id_to_hex(&id, hex, sizeof hex)) {
+    return;
+  }
+  printf("File: %s\n", meta->filename);
+  printf("Size: %llu bytes\n", (unsigned long long)meta->size);
+  printf("ObjectID: %s\n", hex);
+  printf("Chunks: %u\n", meta->chunk_count);
+  for (i = 0; i < meta->chunk_count; i++) {
+    memcpy(id.bytes, meta->chunk_hashes + (size_t)i * METADATA_CHUNK_HASH_SIZE, NODE_ID_SIZE);
+    if (!node_id_to_hex(&id, hex, sizeof hex)) {
+      continue;
+    }
+    printf("Chunk %u: %s\n", i, hex);
+  }
+  fflush(stdout);
+}
+
+int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t *payload,
+                           size_t payload_len, ack_t *ack, error_t *err) {
+  file_metadata_t meta;
+
+  if (!sp || !hdr || !payload || !ack || !err) {
+    if (err) {
+      fill_join_error(err, 1, "null argument");
+    }
+    return 0;
+  }
+
+  memset(ack, 0, sizeof *ack);
+  memset(err, 0, sizeof *err);
+
+  if (hdr->msg_type != STORE) {
+    fill_join_error(err, 3, "unsupported message type");
+    return 0;
+  }
+
+  metadata_init(&meta);
+  if (!metadata_unpack(&meta, payload, payload_len)) {
+    fill_join_error(err, 1, "malformed STORE payload");
+    return 0;
+  }
+  if (metadata_id_is_zero(meta.owner.bytes) ||
+      memcmp(meta.owner.bytes, hdr->src_node, NODE_ID_SIZE) != 0) {
+    metadata_release(&meta);
+    fill_join_error(err, 1, "malformed STORE payload");
+    return 0;
+  }
+
+  if (!metadata_table_put(&sp->metadata, &meta)) {
+    const int full = metadata_table_find_id(&sp->metadata, meta.object_id) == NULL &&
+                     sp->metadata.count >= METADATA_TABLE_MAX;
+    metadata_release(&meta);
+    if (full) {
+      fill_join_error(err, 6, "metadata table full");
+    } else {
+      fill_join_error(err, 1, "malformed STORE payload");
+    }
+    return 0;
+  }
+
+  const file_metadata_t* stored = metadata_table_find_id(&sp->metadata, meta.object_id);
+  metadata_record_print(stored);
+  metadata_release(&meta);
+  memcpy(ack->node_id, hdr->src_node, NODE_ID_SIZE);
   return 1;
 }
 
@@ -337,6 +421,25 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
     superpeer_handle_leave(sp, &msg.header, &payload.leave, &ack);
     pthread_mutex_unlock(&sp->members_lock);
     send_ack(conn, &msg.header, &sp->self_id, &ack);
+  } else if (msg.header.msg_type == STORE) {
+    ack_t ack;
+    error_t err;
+    int ok;
+
+    memset(&ack, 0, sizeof ack);
+    memset(&err, 0, sizeof err);
+    pthread_mutex_lock(&sp->metadata_lock);
+    ok = superpeer_handle_store(sp, &msg.header, in_buf, msg.header.pl_size, &ack, &err);
+    pthread_mutex_unlock(&sp->metadata_lock);
+    if (ok) {
+      send_ack(conn, &msg.header, &sp->self_id, &ack);
+    } else {
+      if (err.code == 0) {
+        err.code = 1;
+      }
+      send_error(conn, &msg.header, &sp->self_id, err.code,
+                 err.reason[0] ? (const char *)err.reason : "STORE rejected");
+    }
   } else {
     send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
   }

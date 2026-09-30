@@ -116,7 +116,7 @@ typedef struct ackPayload{
  * @brief Payload de ERROR (68 bytes): código e motivo.
  */
 typedef struct errorPayload{
-	uint32_t code;       /**< 1 malformado, 2 tabela cheia, 3 não suportado, 4 tipo inválido. */
+	uint32_t code;       /**< 1 malformado, 2 membros cheia, 3 não suportado, 4 tipo inválido, 6 metadata cheia. */
 	uint8_t reason[64];  /**< Texto UTF-8, NUL-padded. */
 }error_t;
 
@@ -149,6 +149,7 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
  *
  * Lê o header em @p in_buf, confere o CRC32 do payload e só então faz o unpack
  * do tipo (@c JOIN, @c LEAVE, @c ACK, @c ERROR). PING/PONG não têm payload.
+ * @c STORE e @c LOOKUP passam com o payload cru: o handler desserializa.
  * @param in_buf Mensagem completa: @c HEADER_SIZE bytes de header e em seguida o payload.
  * @param buf_len Bytes válidos em @p in_buf. Precisa cobrir @c HEADER_SIZE + @c pl_size.
  * @param out_hdr Recebe o header; o caller aloca.
@@ -233,7 +234,7 @@ int send_ack(int fd, const pl_header *req, const node_id_t *self, const ack_t *a
  * @param fd Socket conectado.
  * @param req Header da mensagem original.
  * @param self NodeID de quem responde.
- * @param code Código CP1 (`1` malformado, `2` tabela cheia, `3` não suportado, `4` tipo inválido).
+ * @param code `1` malformado, `2` membros cheia, `3` não suportado, `4` tipo inválido, `6` metadata cheia.
  * @param reason Texto UTF-8 (até 63 chars + NUL); pode ser NULL.
  * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
  */
