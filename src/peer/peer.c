@@ -8,6 +8,7 @@
 #include "../../include/common/protocol.h"
 #include "../../include/common/node.h"
 #include "../../include/common/config.h"
+#include "../../include/peer/upload.h"
 
 #include <getopt.h>
 #include <signal.h>
@@ -88,11 +89,107 @@ int peer_init(peer_t* peer, const char *conf_path){
 	return 1;
 }
 
+#define PEER_CONF "config/peer1.conf"
+#define STORAGE_ROOT "storage"
+
+/* Registra o metadado no Super Peer de bootstrap via STORE. Best-effort. */
+static void store_to_superpeer(const peer_t *self, const node_config_t *cfg,
+                               const file_metadata_t *meta) {
+	char host[INET_ADDRSTRLEN];
+	uint16_t port;
+	size_t wire;
+	uint8_t payload[MAX_CONTROL_PAYLOAD_SZ];
+	uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+	pl_header h;
+	int fd;
+
+	if (cfg->bootstrap_count <= 0) {
+		printf("(sem bootstrap no .conf; metadado nao enviado ao Super Peer)\n");
+		return;
+	}
+	port = cfg->bootstrap[0].port;
+	if (!inet_ntop(AF_INET, &cfg->bootstrap[0].ipv4, host, sizeof host))
+		return;
+
+	wire = metadata_wire_size(meta->chunk_count);
+	if (wire == 0 || wire > sizeof payload) {
+		fprintf(stderr, "STORE: metadado nao cabe no payload de controle\n");
+		return;
+	}
+	if (metadata_pack(meta, payload, sizeof payload) != (ssize_t)wire)
+		return;
+
+	fd = net_connect(host, port);
+	if (fd < 0) {
+		fprintf(stderr, "STORE: nao conectou ao Super Peer %s:%u\n", host, port);
+		return;
+	}
+
+	memset(&h, 0, sizeof h);
+	h.protocol_ver = PROTOCOL_VER;
+	h.msg_type = STORE;
+	h.time = (uint64_t)time(NULL);
+	h.pl_size = (uint32_t)wire;
+	memcpy(h.src_node, self->node_id.bytes, NODE_ID_SIZE);
+
+	if (simple_send(fd, buf, payload, (uint32_t)wire, &h) == NET_OK) {
+		uint8_t reply[MAX_CONTROL_PAYLOAD_SZ];
+		msg_t r;
+		printf("TX STORE\n");
+		r = simple_recv(fd, reply, sizeof reply);
+		if (r.status == NET_OK)
+			printf("RX %s\n", message_type_name(r.header.msg_type));
+		else
+			fprintf(stderr, "STORE: sem resposta valida do Super Peer\n");
+	}
+	net_close(fd);
+}
+
+/* Subcomando: ./peer upload <arquivo> */
+static int cmd_upload(int argc, char *argv[]) {
+	const char *path;
+	peer_t self;
+	node_config_t cfg;
+	file_metadata_t meta;
+
+	if (argc < 3) {
+		fprintf(stderr, "uso: %s upload <arquivo>\n", argv[0]);
+		return 1;
+	}
+	path = argv[2];
+
+	if (!peer_init(&self, PEER_CONF) || !node_config_load(PEER_CONF, &cfg))
+		return 1;
+
+	if (!upload_prepare(path, STORAGE_ROOT, &self.node_id, &meta)) {
+		fprintf(stderr, "upload: falha ao processar %s\n", path);
+		return 1;
+	}
+
+	upload_print_report(&meta);
+	store_to_superpeer(&self, &cfg, &meta);
+	metadata_release(&meta);
+	return 0;
+}
+
 int main(int argc, char* argv[]){
 	const char *cmd  = NULL;
 
 	/* Peer fechado devolve EPIPE no send; nao mata o processo. */
 	signal(SIGPIPE, SIG_IGN);
+
+	/* Subcomandos posicionais do CP2: ./peer upload|download <arquivo> */
+	if (argc >= 2 && argv[1][0] != '-') {
+		if (strcmp(argv[1], "upload") == 0)
+			return cmd_upload(argc, argv);
+		if (strcmp(argv[1], "download") == 0) {
+			fprintf(stderr, "download: ainda nao implementado (item 6)\n");
+			return 1;
+		}
+		fprintf(stderr, "subcomando desconhecido: %s\n", argv[1]);
+		return 1;
+	}
+
     const char *host = "127.0.0.1";
     long port = 0;
 	

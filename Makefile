@@ -20,6 +20,12 @@ METADATA_OBJ = $(OBJ_DIR)/superpeer/metadata.o
 SUPERPEER_MAIN_OBJ = $(OBJ_DIR)/superpeer/main.o
 PEER_MAIN_OBJ = $(OBJ_DIR)/peer/peer.o
 
+# Módulos do pipeline de arquivos do peer (CP2)
+PEER_OBJS = \
+	$(OBJ_DIR)/peer/upload.o \
+	$(OBJ_DIR)/peer/file_pipeline.o \
+	$(OBJ_DIR)/peer/storage.o
+
 # Executáveis a gerar
 TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node $(BIN_DIR)/client
 TEST_NODE = $(BIN_DIR)/test_node
@@ -29,12 +35,13 @@ TEST_METADATA = $(BIN_DIR)/test_metadata
 TEST_COMPRESSION = $(BIN_DIR)/test_compression
 TEST_FILE_PIPELINE = $(BIN_DIR)/test_file_pipeline
 TEST_STORAGE = $(BIN_DIR)/test_storage
+TEST_UPLOAD = $(BIN_DIR)/test_upload
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
@@ -42,6 +49,7 @@ test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMP
 	$(TEST_COMPRESSION)
 	$(TEST_FILE_PIPELINE)
 	$(TEST_STORAGE)
+	$(TEST_UPLOAD)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -56,7 +64,7 @@ $(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SUPERPEER_MAIN_OBJ) $(C
 $(BIN_DIR)/node: $(BIN_DIR)/superpeer
 	cp -f $< $@
 
-$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(COMMON_OBJS)
+$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(PEER_OBJS) $(COMMON_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
@@ -79,6 +87,9 @@ $(BIN_DIR)/test_file_pipeline: tests/peer/test_file_pipeline.c $(OBJ_DIR)/peer/f
 
 $(BIN_DIR)/test_storage: tests/peer/test_storage.c $(OBJ_DIR)/peer/storage.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
+
+$(BIN_DIR)/test_upload: tests/peer/test_upload.c $(OBJ_DIR)/peer/upload.o $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/peer/storage.o $(OBJ_DIR)/common/compression.o $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compila tests/foo.c em obj/tests/foo.o
 $(OBJ_DIR)/tests/%.o: tests/%.c
