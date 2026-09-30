@@ -2,7 +2,10 @@
  * download.c — pipeline de download do CP2 (Aluno 1).
  * metadado (índice local) -> chunks do storage -> LZ4 decode -> SHA-256 por
  * chunk -> remonta -> SHA-256(arquivo) == ObjectID -> grava a saída.
+ * Os chunks são processados em paralelo (thread pool): cada worker cuida de um
+ * subconjunto de índices, escrevendo em regiões disjuntas do buffer de saída.
  */
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +17,77 @@
 #include "../../include/common/compression.h"
 #include "../../include/common/node.h"
 #include "../../include/common/protocol.h"
+
+/** Número de threads na transferência paralela de chunks. */
+#define TRANSFER_WORKERS 4
+
+/* Trabalho de um worker: chunks start, start+workers, start+2*workers, ... */
+typedef struct {
+	const char *root;
+	const file_metadata_t *meta;
+	uint8_t *out_buf;
+	uint32_t start;
+	uint32_t workers;
+	int ok;
+} dl_task_t;
+
+/* Descomprime e verifica os chunks do worker, escrevendo em out_buf por offset. */
+static void *dl_worker(void *arg) {
+	dl_task_t *t = arg;
+	size_t comp_cap = lz4_compress_bound(CHUNK_SIZE);
+	uint8_t *comp = comp_cap ? malloc(comp_cap) : NULL;
+	uint32_t i;
+
+	if (!comp) {
+		t->ok = 0;
+		return NULL;
+	}
+	for (i = t->start; i < t->meta->chunk_count; i += t->workers) {
+		size_t off = (size_t)i * CHUNK_SIZE;
+		size_t expect = t->meta->size - off < CHUNK_SIZE ? t->meta->size - off : CHUNK_SIZE;
+		size_t comp_len = 0;
+		size_t plain_len = 0;
+		uint8_t digest[NODE_ID_SIZE];
+
+		if (!storage_get_chunk(t->root, t->meta->object_id, i, comp, comp_cap, &comp_len) ||
+		    lz4_decompress(comp, comp_len, t->out_buf + off, expect, &plain_len) != COMP_OK ||
+		    plain_len != expect ||
+		    !sha256(t->out_buf + off, plain_len, digest) ||
+		    memcmp(digest, t->meta->chunk_hashes + (size_t)i * NODE_ID_SIZE, NODE_ID_SIZE) != 0) {
+			free(comp);
+			t->ok = 0;
+			return NULL;
+		}
+	}
+	free(comp);
+	t->ok = 1;
+	return NULL;
+}
+
+/* Processa os chunks em paralelo. Devolve 1 se todos os workers tiveram sucesso. */
+static int transfer_chunks(const char *root, const file_metadata_t *meta, uint8_t *out_buf) {
+	pthread_t th[TRANSFER_WORKERS];
+	dl_task_t task[TRANSFER_WORKERS];
+	uint32_t nw = meta->chunk_count < TRANSFER_WORKERS ? meta->chunk_count : TRANSFER_WORKERS;
+	uint32_t spawned = 0;
+	uint32_t w;
+	int all_ok = 1;
+
+	for (w = 0; w < nw; w++) {
+		task[w] = (dl_task_t){root, meta, out_buf, w, nw, 0};
+		if (pthread_create(&th[w], NULL, dl_worker, &task[w]) != 0) {
+			all_ok = 0;
+			break;
+		}
+		spawned++;
+	}
+	for (w = 0; w < spawned; w++) {
+		pthread_join(th[w], NULL);
+		if (!task[w].ok)
+			all_ok = 0;
+	}
+	return all_ok;
+}
 
 /* Grava len bytes de buf em path. Devolve 1/0. */
 static int write_file(const char *path, const uint8_t *buf, size_t len) {
@@ -31,10 +105,7 @@ int download_file(const char *name, const char *output, const char *storage_root
 	size_t meta_len = 0;
 	file_metadata_t meta;
 	uint8_t *out_buf = NULL;
-	uint8_t *comp = NULL;
-	size_t comp_cap;
 	uint8_t digest[NODE_ID_SIZE];
-	uint32_t i;
 	int rc = 0;
 
 	if (!name || !output || !storage_root)
@@ -63,31 +134,13 @@ int download_file(const char *name, const char *output, const char *storage_root
 	}
 
 	out_buf = malloc((size_t)meta.size);
-	comp_cap = lz4_compress_bound(CHUNK_SIZE);
-	if (!out_buf || comp_cap == 0 || !(comp = malloc(comp_cap)))
+	if (!out_buf)
 		goto done;
 
-	for (i = 0; i < meta.chunk_count; i++) {
-		size_t off = (size_t)i * CHUNK_SIZE;
-		size_t expect = meta.size - off < CHUNK_SIZE ? meta.size - off : CHUNK_SIZE;
-		size_t comp_len = 0;
-		size_t plain_len = 0;
-
-		if (!storage_get_chunk(storage_root, meta.object_id, i, comp, comp_cap, &comp_len)) {
-			fprintf(stderr, "download: chunk %u ausente\n", i);
-			goto done;
-		}
-		if (lz4_decompress(comp, comp_len, out_buf + off, expect, &plain_len) != COMP_OK ||
-		    plain_len != expect) {
-			fprintf(stderr, "download: falha ao descomprimir chunk %u\n", i);
-			goto done;
-		}
-		/* Hash do chunk sobre os bytes originais (contrato C2). */
-		if (!sha256(out_buf + off, plain_len, digest) ||
-		    memcmp(digest, meta.chunk_hashes + (size_t)i * NODE_ID_SIZE, NODE_ID_SIZE) != 0) {
-			fprintf(stderr, "download: SHA-256 do chunk %u nao confere\n", i);
-			goto done;
-		}
+	/* Transferência paralela: descomprime + verifica cada chunk. */
+	if (!transfer_chunks(storage_root, &meta, out_buf)) {
+		fprintf(stderr, "download: falha na transferencia/verificacao dos chunks\n");
+		goto done;
 	}
 
 	/* Verificação final: SHA-256 do arquivo remontado == ObjectID. */
@@ -107,7 +160,6 @@ int download_file(const char *name, const char *output, const char *storage_root
 	rc = 1;
 
 done:
-	free(comp);
 	free(out_buf);
 	metadata_release(&meta);
 	return rc;
