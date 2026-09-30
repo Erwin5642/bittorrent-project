@@ -2,3 +2,9 @@ bin/
 obj/
 compile_commands.json
 tests/c1/test_protocol
+
+# Storage local de chunks criado em runtime pelo peer
+storage/
+
+# Fixtures do harness, geradas por tests/generate_fixtures.sh (ou tests/data.tar.gz)
+tests/data/
