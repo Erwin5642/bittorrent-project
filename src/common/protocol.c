@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
@@ -209,6 +210,159 @@ int unpack_leave(leave_t* out_st, const uint8_t* in_msg){
 	return 0;
 }
 
+/* ObjectID zerado nao identifica arquivo. */
+static int metadata_id_is_zero(const uint8_t id[METADATA_OBJECT_ID_SIZE]) {
+	size_t i;
+
+	for (i = 0; i < METADATA_OBJECT_ID_SIZE; i++) {
+		if (id[i] != 0)
+			return 0;
+	}
+	return 1;
+}
+
+/* Nome logico: nao vazio e com NUL dentro dos 256 bytes do campo. */
+static int metadata_name_ok(const char *filename) {
+	size_t i;
+
+	if (!filename || filename[0] == '\0')
+		return 0;
+	for (i = 0; i < METADATA_FILENAME_MAX; i++) {
+		if (filename[i] == '\0')
+			return 1;
+	}
+	return 0;
+}
+
+/* Prefixo fixo mais a cauda de hashes. 0 se passar de METADATA_PAYLOAD_MAX. */
+size_t metadata_wire_size(uint32_t chunk_count) {
+	size_t tail;
+
+	if (chunk_count > (METADATA_PAYLOAD_MAX - METADATA_WIRE_PREFIX) / METADATA_CHUNK_HASH_SIZE)
+		return 0;
+	tail = (size_t)chunk_count * METADATA_CHUNK_HASH_SIZE;
+	return (size_t)METADATA_WIRE_PREFIX + tail;
+}
+
+/* Zera o registro. O bloco de hashes, se houver, continua com quem chama. */
+void metadata_init(file_metadata_t *meta) {
+	if (!meta)
+		return;
+	memset(meta, 0, sizeof *meta);
+}
+
+/* Libera a cauda de hashes e zera o registro. */
+void metadata_release(file_metadata_t *meta) {
+	if (!meta)
+		return;
+	free(meta->chunk_hashes);
+	metadata_init(meta);
+}
+
+/*
+ * Prefixo de METADATA_WIRE_PREFIX bytes e, em seguida, chunk_count hashes
+ * crus de 32 bytes. O ponteiro chunk_hashes nao vai para o fio.
+ */
+ssize_t metadata_pack(const file_metadata_t *meta, uint8_t *out, size_t out_cap) {
+	uint64_t temp_64;
+	uint32_t temp_32;
+
+	if (!meta || !out)
+		return -1;
+	if (metadata_id_is_zero(meta->object_id) || !metadata_name_ok(meta->filename))
+		return -1;
+	if (meta->chunk_count > 0 && !meta->chunk_hashes)
+		return -1;
+
+	const size_t need = metadata_wire_size(meta->chunk_count);
+	if (need == 0 || out_cap < need)
+		return -1;
+
+	uint8_t* pt = out;
+	memcpy(pt, meta->object_id, METADATA_OBJECT_ID_SIZE);
+	pt += METADATA_OBJECT_ID_SIZE;
+
+	memcpy(pt, meta->filename, METADATA_FILENAME_MAX);
+	pt += METADATA_FILENAME_MAX;
+
+	temp_64 = my_ntohll(meta->size);
+	memcpy(pt, &temp_64, sizeof temp_64);
+	pt += sizeof temp_64;
+
+	temp_32 = htonl(meta->chunk_count);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	pt += sizeof temp_32;
+
+	temp_32 = htonl(meta->version);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	pt += sizeof temp_32;
+
+	memcpy(pt, meta->owner.bytes, NODE_ID_SIZE);
+	pt += NODE_ID_SIZE;
+
+	/* Cada hash e um digest cru; nao ha endianness dentro do SHA-256. */
+	if (meta->chunk_count > 0) {
+		const size_t tail = (size_t)meta->chunk_count * METADATA_CHUNK_HASH_SIZE;
+		memcpy(pt, meta->chunk_hashes, tail);
+	}
+	return (ssize_t)need;
+}
+
+/*
+ * Inverso de metadata_pack. A cauda so e alocada depois de validar o
+ * prefixo; falha devolve 0 sem deixar bloco pendente e sem mexer em out.
+ */
+int metadata_unpack(file_metadata_t *out, const uint8_t *in, size_t in_len) {
+	file_metadata_t tmp;
+	uint64_t temp_64;
+	uint32_t temp_32;
+
+	if (!out || !in || in_len < METADATA_WIRE_PREFIX)
+		return 0;
+
+	metadata_init(&tmp);
+	const uint8_t* pt = in;
+
+	memcpy(tmp.object_id, pt, METADATA_OBJECT_ID_SIZE);
+	pt += METADATA_OBJECT_ID_SIZE;
+
+	memcpy(tmp.filename, pt, METADATA_FILENAME_MAX);
+	pt += METADATA_FILENAME_MAX;
+
+	memcpy(&temp_64, pt, sizeof temp_64);
+	tmp.size = my_ntohll(temp_64);
+	pt += sizeof temp_64;
+
+	memcpy(&temp_32, pt, sizeof temp_32);
+	tmp.chunk_count = ntohl(temp_32);
+	pt += sizeof temp_32;
+
+	memcpy(&temp_32, pt, sizeof temp_32);
+	tmp.version = ntohl(temp_32);
+	pt += sizeof temp_32;
+
+	memcpy(tmp.owner.bytes, pt, NODE_ID_SIZE);
+	pt += NODE_ID_SIZE;
+
+	if (metadata_id_is_zero(tmp.object_id) || !metadata_name_ok(tmp.filename))
+		return 0;
+
+	const size_t need = metadata_wire_size(tmp.chunk_count);
+	if (need == 0 || in_len != need)
+		return 0;
+
+	if (tmp.chunk_count > 0) {
+		const size_t tail = (size_t)tmp.chunk_count * METADATA_CHUNK_HASH_SIZE;
+		tmp.chunk_hashes = malloc(tail);
+		if (!tmp.chunk_hashes)
+			return 0;
+		memcpy(tmp.chunk_hashes, pt, tail);
+	}
+
+	*out = tmp;
+	return 1;
+}
+
 /* Le o header de 99 bytes do buffer, convertendo os campos de big-endian. */
 int unpack_header(pl_header* out_st, const uint8_t* in_msg){
 	const uint8_t* pt = in_msg;
@@ -279,7 +433,6 @@ int pack_header(const pl_header* in_st, uint8_t* out_st){
 	return 0;
 
 }
-
 
 /*
  * Empacota o payload do tipo, calcula o CRC32 desses bytes e serializa o header
