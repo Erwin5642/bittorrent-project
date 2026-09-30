@@ -81,4 +81,29 @@ int storage_has_chunk(const char *root, const uint8_t object_id[NODE_ID_SIZE],
 long storage_chunk_size(const char *root, const uint8_t object_id[NODE_ID_SIZE],
                         uint32_t index);
 
+/**
+ * @brief Grava o metadado empacotado indexado por nome: `<root>/index/<name>.meta`.
+ *
+ * Permite ao `download` resolver `name → metadado` localmente (o mesmo que o
+ * `LOOKUP` faria pela rede), já que upload e download rodam na mesma máquina.
+ * @param root Diretório raiz do storage.
+ * @param name Nome lógico do arquivo; não pode conter '/'.
+ * @param data Bytes do metadado (saída de @c metadata_pack).
+ * @param len Tamanho de @p data.
+ * @return 1 em sucesso, 0 em nome inválido ou erro de I/O.
+ */
+int storage_put_meta(const char *root, const char *name, const uint8_t *data, size_t len);
+
+/**
+ * @brief Lê o metadado empacotado indexado por nome (ver @c storage_put_meta).
+ * @param root Diretório raiz do storage.
+ * @param name Nome lógico do arquivo.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out.
+ * @param out_len Recebe o número de bytes lidos.
+ * @return 1 em sucesso, 0 se não existir, não couber ou em erro de I/O.
+ */
+int storage_get_meta(const char *root, const char *name, uint8_t *out, size_t out_cap,
+                     size_t *out_len);
+
 #endif

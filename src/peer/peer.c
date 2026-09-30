@@ -8,6 +8,9 @@
 #include "../../include/common/protocol.h"
 #include "../../include/common/node.h"
 #include "../../include/common/config.h"
+#include "../../include/peer/upload.h"
+#include "../../include/peer/download.h"
+#include "../../include/peer/storage.h"
 
 #include <getopt.h>
 #include <signal.h>
@@ -88,30 +91,153 @@ int peer_init(peer_t* peer, const char *conf_path){
 	return 1;
 }
 
+#define PEER_CONF "config/peer1.conf"
+#define STORAGE_ROOT "storage"
+
+/* Registra o metadado no Super Peer de bootstrap via STORE. Best-effort. */
+static void store_to_superpeer(const peer_t *self, const node_config_t *cfg,
+                               const file_metadata_t *meta) {
+	char host[INET_ADDRSTRLEN];
+	uint16_t port;
+	size_t wire;
+	uint8_t payload[MAX_CONTROL_PAYLOAD_SZ];
+	uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+	pl_header h;
+	int fd;
+
+	if (cfg->bootstrap_count <= 0) {
+		printf("(sem bootstrap no .conf; metadado nao enviado ao Super Peer)\n");
+		return;
+	}
+	port = cfg->bootstrap[0].port;
+	if (!inet_ntop(AF_INET, &cfg->bootstrap[0].ipv4, host, sizeof host))
+		return;
+
+	wire = metadata_wire_size(meta->chunk_count);
+	if (wire == 0 || wire > sizeof payload) {
+		fprintf(stderr, "STORE: metadado nao cabe no payload de controle\n");
+		return;
+	}
+	if (metadata_pack(meta, payload, sizeof payload) != (ssize_t)wire)
+		return;
+
+	fd = net_connect(host, port);
+	if (fd < 0) {
+		fprintf(stderr, "STORE: nao conectou ao Super Peer %s:%u\n", host, port);
+		return;
+	}
+
+	memset(&h, 0, sizeof h);
+	h.protocol_ver = PROTOCOL_VER;
+	h.msg_type = STORE;
+	h.time = (uint64_t)time(NULL);
+	h.pl_size = (uint32_t)wire;
+	memcpy(h.src_node, self->node_id.bytes, NODE_ID_SIZE);
+
+	if (simple_send(fd, buf, payload, (uint32_t)wire, &h) == NET_OK) {
+		uint8_t reply[MAX_CONTROL_PAYLOAD_SZ];
+		msg_t r;
+		printf("TX STORE\n");
+		r = simple_recv(fd, reply, sizeof reply);
+		if (r.status == NET_OK)
+			printf("RX %s\n", message_type_name(r.header.msg_type));
+		else
+			fprintf(stderr, "STORE: sem resposta valida do Super Peer\n");
+	}
+	net_close(fd);
+}
+
+/* Identidade do peer: usa o .conf se houver, senão gera um NodeID efêmero. */
+static void peer_identity(peer_t *self, node_config_t *cfg) {
+	node_uuid_t uuid;
+
+	if (peer_init(self, PEER_CONF) && node_config_load(PEER_CONF, cfg))
+		return;
+
+	/* Sem config: identidade efêmera, sem bootstrap. Pipeline local ainda roda. */
+	memset(cfg, 0, sizeof *cfg);
+	memset(self, 0, sizeof *self);
+	self->type = PEER;
+	if (node_uuid_random(&uuid))
+		node_id_generate(0, 0, &uuid, &self->node_id);
+}
+
+/* Grava o metadado empacotado no índice local, para o download resolver por nome. */
+static void index_metadata(const file_metadata_t *meta) {
+	uint8_t wire[METADATA_PAYLOAD_MAX];
+	ssize_t n = metadata_pack(meta, wire, sizeof wire);
+
+	if (n > 0)
+		storage_put_meta(STORAGE_ROOT, meta->filename, wire, (size_t)n);
+}
+
+/* Subcomando: --cmd upload --file <arquivo> */
+static int cmd_upload(const char *file) {
+	peer_t self;
+	node_config_t cfg;
+	file_metadata_t meta;
+
+	if (!file) {
+		fprintf(stderr, "upload: faltou --file <arquivo>\n");
+		return 1;
+	}
+	peer_identity(&self, &cfg);
+
+	if (!upload_prepare(file, STORAGE_ROOT, &self.node_id, &meta)) {
+		fprintf(stderr, "upload: falha ao processar %s\n", file);
+		return 1;
+	}
+
+	upload_print_report(&meta);
+	index_metadata(&meta);
+	store_to_superpeer(&self, &cfg, &meta);
+	metadata_release(&meta);
+	return 0;
+}
+
+/* Subcomando: --cmd download --name <nome> --output <saida> */
+static int cmd_download(const char *name, const char *output) {
+	if (!name || !output) {
+		fprintf(stderr, "download: faltou --name <nome> e/ou --output <saida>\n");
+		return 1;
+	}
+	if (!download_file(name, output, STORAGE_ROOT)) {
+		fprintf(stderr, "download: falha ao baixar %s\n", name);
+		return 1;
+	}
+	return 0;
+}
+
 int main(int argc, char* argv[]){
 	const char *cmd  = NULL;
 
 	/* Peer fechado devolve EPIPE no send; nao mata o processo. */
 	signal(SIGPIPE, SIG_IGN);
+
     const char *host = "127.0.0.1";
+    const char *file = NULL;
+    const char *name = NULL;
+    const char *output = NULL;
     long port = 0;
-	
+
     static struct option long_opts[] = {
-        {"cmd",  required_argument, NULL, 'c'},
-        {"host", required_argument, NULL, 'h'},
-        {"port", required_argument, NULL, 'p'},
-        {NULL,   0,                 NULL,  0 }
+        {"cmd",    required_argument, NULL, 'c'},
+        {"host",   required_argument, NULL, 'h'},
+        {"port",   required_argument, NULL, 'p'},
+        {"file",   required_argument, NULL, 'f'},
+        {"name",   required_argument, NULL, 'n'},
+        {"output", required_argument, NULL, 'o'},
+        {NULL,     0,                 NULL,  0 }
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:", long_opts, NULL)) != -1) {
         switch (opt) {
-        case 'c':
-            cmd = optarg;
-            break;
-        case 'h':
-            host = optarg;
-            break;
+        case 'c': cmd = optarg; break;
+        case 'h': host = optarg; break;
+        case 'f': file = optarg; break;
+        case 'n': name = optarg; break;
+        case 'o': output = optarg; break;
         case 'p': {
             char *end;
             port = strtol(optarg, &end, 10);
@@ -122,18 +248,28 @@ int main(int argc, char* argv[]){
             break;
         }
         default:
-            fprintf(stderr, "uso: %s --cmd <ping|join|leave> "
-                            "--host <ip> --port <porta>\n", argv[0]);
+            fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave> ...\n", argv[0]);
             return 1;
         }
     }
 
-    if (!cmd || port == 0) {
-        fprintf(stderr, "uso: %s --cmd <ping|join|leave> "
-                        "--host <ip> --port <porta>\n", argv[0]);
+    if (!cmd) {
+        fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave> ...\n", argv[0]);
         return 1;
     }
-	
+
+    /* Subcomandos de arquivo do CP2. */
+    if (strcmp(cmd, "upload") == 0)
+        return cmd_upload(file);
+    if (strcmp(cmd, "download") == 0)
+        return cmd_download(name, output);
+
+    /* Comandos de controle do CP1 (ping/join/leave) exigem host/porta. */
+    if (port == 0) {
+        fprintf(stderr, "uso: %s --cmd <ping|join|leave> --host <ip> --port <porta>\n", argv[0]);
+        return 1;
+    }
+
     printf("cmd=%s host=%s port=%ld\n", cmd, host, port);
 
     int32_t type = cmd_to_type(cmd);
