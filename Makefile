@@ -15,6 +15,7 @@ COMMON_OBJS = \
 	$(OBJ_DIR)/common/network.o \
 	$(OBJ_DIR)/common/protocol.o
 SUPERPEER_OBJ = $(OBJ_DIR)/superpeer/superpeer.o
+METADATA_OBJ = $(OBJ_DIR)/superpeer/metadata.o
 SUPERPEER_MAIN_OBJ = $(OBJ_DIR)/superpeer/main.o
 PEER_MAIN_OBJ = $(OBJ_DIR)/peer/peer.o
 
@@ -23,15 +24,17 @@ TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node $(BIN_DIR)/client
 TEST_NODE = $(BIN_DIR)/test_node
 TEST_CONFIG = $(BIN_DIR)/test_config
 TEST_SUPERPEER = $(BIN_DIR)/test_superpeer
+TEST_METADATA = $(BIN_DIR)/test_metadata
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
+	$(TEST_METADATA)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -40,7 +43,7 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 # Ligação
-$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(SUPERPEER_MAIN_OBJ) $(COMMON_OBJS)
+$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SUPERPEER_MAIN_OBJ) $(COMMON_OBJS)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/node: $(BIN_DIR)/superpeer
@@ -55,7 +58,10 @@ $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_U
 $(BIN_DIR)/test_config: tests/common/test_config.c $(OBJ_DIR)/common/config.o $(TEST_UTILS_OBJ) | $(BIN_DIR) $(OBJ_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(BIN_DIR)/test_superpeer: tests/superpeer/test_superpeer.c $(SUPERPEER_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/test_superpeer: tests/superpeer/test_superpeer.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_metadata: tests/superpeer/test_metadata.c $(METADATA_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compila tests/foo.c em obj/tests/foo.o
