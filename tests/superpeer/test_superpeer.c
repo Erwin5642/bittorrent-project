@@ -3,11 +3,12 @@
 
 #include <arpa/inet.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /**
  * @file test_superpeer.c
- * @brief Testes unitários da tabela de membros e do handler de JOIN (sem socket).
+ * @brief Testes unitários de membros, JOIN e STORE (sem socket).
  */
 
 /**
@@ -52,12 +53,13 @@ static void make_join(pl_header *hdr, join_t *join, uint8_t seed, uint32_t ipv4,
 }
 
 /**
- * @brief Super Peer zerado só com tabela vazia (sem listen).
+ * @brief Super Peer zerado, com as tabelas vazias (sem listen).
  */
 static void sp_reset(superpeer_t *sp) {
   memset(sp, 0, sizeof *sp);
   sp->listend_fd = -1;
   member_table_init(&sp->members);
+  metadata_table_init(&sp->metadata);
 }
 
 /**
@@ -296,6 +298,193 @@ static void test_handle_join_null(void) {
 }
 
 /**
+ * @brief Empacota um STORE cujo owner vira src_node. Libera os hashes locais.
+ */
+static int pack_store(uint8_t *buf, size_t cap, pl_header *hdr, uint32_t index, const char *name,
+                      uint32_t version, uint32_t chunks) {
+  file_metadata_t meta;
+  ssize_t n;
+  size_t i;
+
+  metadata_init(&meta);
+  meta.object_id[0] = 0xA0;
+  meta.object_id[1] = (uint8_t)(index >> 8);
+  meta.object_id[2] = (uint8_t)index;
+  meta.object_id[3] = 0x5A;
+  strncpy(meta.filename, name, METADATA_FILENAME_MAX - 1);
+  meta.size = 1000u + index;
+  meta.chunk_count = chunks;
+  meta.version = version;
+  memset(meta.owner.bytes, 0x11, NODE_ID_SIZE);
+  meta.owner.bytes[0] = (uint8_t)(index + 1);
+  if (chunks > 0) {
+    meta.chunk_hashes = malloc((size_t)chunks * METADATA_CHUNK_HASH_SIZE);
+    if (!meta.chunk_hashes) {
+      return 0;
+    }
+    for (i = 0; i < (size_t)chunks * METADATA_CHUNK_HASH_SIZE; i++) {
+      meta.chunk_hashes[i] = (uint8_t)(0x40 + i);
+    }
+  }
+  n = metadata_pack(&meta, buf, cap);
+  memset(hdr, 0, sizeof *hdr);
+  hdr->msg_type = STORE;
+  hdr->pl_size = n < 0 ? 0 : (uint32_t)n;
+  memcpy(hdr->src_node, meta.owner.bytes, NODE_ID_SIZE);
+  metadata_release(&meta);
+  return n > 0;
+}
+
+/**
+ * @brief STORE válido entra na tabela, preserva a versão e ecoa o owner no ACK.
+ */
+static void test_handle_store_ok(void) {
+  superpeer_t sp;
+  pl_header hdr;
+  ack_t ack;
+  error_t err;
+  uint8_t buf[METADATA_WIRE_PREFIX + METADATA_CHUNK_HASH_SIZE];
+  const file_metadata_t *found;
+
+  sp_reset(&sp);
+  expect(pack_store(buf, sizeof buf, &hdr, 1, "arquivo.pdf", 4, 1), "empacota STORE");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 1, "STORE sucede");
+  expect(sp.metadata.count == 1, "um registro");
+  expect(memcmp(ack.node_id, hdr.src_node, NODE_ID_SIZE) == 0, "ACK ecoa owner");
+  found = metadata_table_find_name(&sp.metadata, "arquivo.pdf");
+  expect(found != NULL && found->version == 4, "primeira versao permanece");
+  expect(found != NULL && found->size == 1001, "tamanho original");
+  expect(found != NULL && found->chunk_count == 1 && found->chunk_hashes[0] == 0x40, "hash do chunk");
+  metadata_table_clear(&sp.metadata);
+}
+
+/**
+ * @brief ObjectID já conhecido atualiza os campos e incrementa version.
+ */
+static void test_handle_store_updates(void) {
+  superpeer_t sp;
+  pl_header hdr;
+  ack_t ack;
+  error_t err;
+  uint8_t buf[METADATA_WIRE_PREFIX];
+  const file_metadata_t *found;
+
+  sp_reset(&sp);
+  expect(pack_store(buf, sizeof buf, &hdr, 2, "a.pdf", 1, 0), "primeiro STORE");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 1, "insere");
+  expect(pack_store(buf, sizeof buf, &hdr, 2, "b.pdf", 9, 0), "segundo STORE");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 1, "atualiza");
+  expect(sp.metadata.count == 1, "nao duplica");
+  found = metadata_table_find_name(&sp.metadata, "b.pdf");
+  expect(found != NULL && found->version == 2, "versao armazenada mais um");
+  expect(metadata_table_find_name(&sp.metadata, "a.pdf") == NULL, "nome antigo sai");
+  metadata_table_clear(&sp.metadata);
+}
+
+/**
+ * @brief Payload curto ou owner diferente de src_node → ERROR 1.
+ */
+static void test_handle_store_malformed(void) {
+  superpeer_t sp;
+  pl_header hdr;
+  ack_t ack;
+  error_t err;
+  uint8_t buf[METADATA_WIRE_PREFIX];
+
+  sp_reset(&sp);
+  expect(pack_store(buf, sizeof buf, &hdr, 3, "c.pdf", 1, 0), "empacota");
+  expect(superpeer_handle_store(&sp, &hdr, buf, 10, &ack, &err) == 0, "cauda curta falha");
+  expect(err.code == 1, "código 1 payload curto");
+  expect(sp.metadata.count == 0, "nao registra payload curto");
+
+  expect(pack_store(buf, sizeof buf, &hdr, 3, "c.pdf", 1, 0), "empacota de novo");
+  hdr.src_node[0] ^= 0xff;
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 0, "owner divergente falha");
+  expect(err.code == 1, "código 1 owner");
+  expect(sp.metadata.count == 0, "nao registra owner divergente");
+}
+
+/**
+ * @brief msg_type diferente de STORE → ERROR 3.
+ */
+static void test_handle_store_wrong_type(void) {
+  superpeer_t sp;
+  pl_header hdr;
+  ack_t ack;
+  error_t err;
+  uint8_t buf[METADATA_WIRE_PREFIX];
+
+  sp_reset(&sp);
+  expect(pack_store(buf, sizeof buf, &hdr, 4, "d.pdf", 1, 0), "empacota");
+  hdr.msg_type = JOIN;
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 0, "JOIN no handler falha");
+  expect(err.code == 3, "código 3 msg_type");
+  expect(sp.metadata.count == 0, "nao registra tipo errado");
+}
+
+/**
+ * @brief Tabela cheia recusa inserção nova com ERROR 6 e ainda atualiza a existente.
+ */
+static void test_handle_store_table_full(void) {
+  superpeer_t sp;
+  pl_header hdr;
+  ack_t ack;
+  error_t err;
+  file_metadata_t meta;
+  uint8_t buf[METADATA_WIRE_PREFIX];
+  uint32_t i;
+  const file_metadata_t *found;
+
+  sp_reset(&sp);
+  for (i = 0; i < METADATA_TABLE_MAX; i++) {
+    metadata_init(&meta);
+    meta.object_id[0] = 0xA0;
+    meta.object_id[1] = (uint8_t)(i >> 8);
+    meta.object_id[2] = (uint8_t)i;
+    meta.object_id[3] = 0x5A;
+    strncpy(meta.filename, "cheio.pdf", METADATA_FILENAME_MAX - 1);
+    meta.size = i;
+    meta.version = 1;
+    memset(meta.owner.bytes, 0x22, NODE_ID_SIZE);
+    if (!metadata_table_put(&sp.metadata, &meta)) {
+      expect(0, "enche a tabela");
+      metadata_table_clear(&sp.metadata);
+      return;
+    }
+  }
+  expect(pack_store(buf, sizeof buf, &hdr, 65000, "novo.pdf", 1, 0), "empacota extra");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 0, "STORE extra falha");
+  expect(err.code == 6, "código 6 tabela cheia");
+  expect(sp.metadata.count == METADATA_TABLE_MAX, "count nao cresce");
+
+  expect(pack_store(buf, sizeof buf, &hdr, 0, "atualizado.pdf", 3, 0), "empacota existente");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, &err) == 1, "atualiza no limite");
+  found = metadata_table_find_name(&sp.metadata, "atualizado.pdf");
+  expect(found != NULL && found->version == 2, "versao incrementada no limite");
+  metadata_table_clear(&sp.metadata);
+}
+
+/**
+ * @brief Argumentos nulos fazem o handler de STORE falhar.
+ */
+static void test_handle_store_null(void) {
+  superpeer_t sp;
+  pl_header hdr;
+  ack_t ack;
+  error_t err;
+  uint8_t buf[METADATA_WIRE_PREFIX];
+
+  sp_reset(&sp);
+  expect(pack_store(buf, sizeof buf, &hdr, 5, "e.pdf", 1, 0), "empacota");
+  expect(superpeer_handle_store(NULL, &hdr, buf, hdr.pl_size, &ack, &err) == 0, "sp NULL");
+  expect(err.code == 1, "código 1 sp NULL");
+  expect(superpeer_handle_store(&sp, NULL, buf, hdr.pl_size, &ack, &err) == 0, "hdr NULL");
+  expect(superpeer_handle_store(&sp, &hdr, NULL, hdr.pl_size, &ack, &err) == 0, "payload NULL");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, NULL, &err) == 0, "ack NULL");
+  expect(superpeer_handle_store(&sp, &hdr, buf, hdr.pl_size, &ack, NULL) == 0, "err NULL");
+}
+
+/**
  * @brief Executa a suíte do Super Peer e devolve o código de test_report.
  */
 int main(void) {
@@ -308,5 +497,11 @@ int main(void) {
   test_handle_join_type_errors();
   test_handle_join_table_full();
   test_handle_join_null();
+  test_handle_store_ok();
+  test_handle_store_updates();
+  test_handle_store_malformed();
+  test_handle_store_wrong_type();
+  test_handle_store_table_full();
+  test_handle_store_null();
   return test_report();
 }
