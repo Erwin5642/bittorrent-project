@@ -11,30 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
-
-#define SUPERPEER_MAX_CONNS 64
-/** Tempo máximo de send/recv por conexão aceita, em segundos. */
-#define NET_IO_TIMEOUT_SEC 5
-
-static int net_set_io_timeout(int fd, int seconds) {
-  struct timeval tv;
-
-  tv.tv_sec = seconds;
-  tv.tv_usec = 0;
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0) {
-    perror("net_set_io_timeout:SO_RCVTIMEO");
-    return -1;
-  }
-  if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
-    perror("net_set_io_timeout:SO_SNDTIMEO");
-    return -1;
-  }
-  return 0;
-}
 
 void member_table_init(member_table_t *table) {
   if (!table) {
@@ -180,15 +158,8 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     fprintf(stderr, "superpeer_init: failed to init mutex\n");
     return 0;
   }
-  if (pthread_mutex_init(&sp->conn_lock, NULL) != 0) {
-    fprintf(stderr, "superpeer_init: failed to init conn mutex\n");
-    pthread_mutex_destroy(&sp->members_lock);
-    return 0;
-  }
-
   fd = net_listen(cfg.port);
   if (fd < 0) {
-    pthread_mutex_destroy(&sp->conn_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
@@ -303,26 +274,6 @@ static void sleep_ms(unsigned ms) {
   nanosleep(&ts, NULL);
 }
 
-static int conn_acquire(superpeer_t *sp) {
-  int ok;
-
-  pthread_mutex_lock(&sp->conn_lock);
-  ok = sp->active_conns < SUPERPEER_MAX_CONNS;
-  if (ok) {
-    sp->active_conns++;
-  }
-  pthread_mutex_unlock(&sp->conn_lock);
-  return ok;
-}
-
-static void conn_release(superpeer_t *sp) {
-  pthread_mutex_lock(&sp->conn_lock);
-  if (sp->active_conns > 0) {
-    sp->active_conns--;
-  }
-  pthread_mutex_unlock(&sp->conn_lock);
-}
-
 typedef struct {
   superpeer_t *sp;
   int conn;
@@ -397,7 +348,6 @@ static void *connection_worker(void *arg) {
   conn_job_t *job = arg;
 
   handle_connection(job->sp, job->conn, job->peer_addr);
-  conn_release(job->sp);
   free(job);
   return NULL;
 }
@@ -421,17 +371,6 @@ int superpeer_run(superpeer_t *sp) {
     if (job->conn < 0) {
       free(job);
       sleep_ms(50);
-      continue;
-    }
-    if (!conn_acquire(sp)) {
-      net_close(job->conn);
-      free(job);
-      continue;
-    }
-    if (net_set_io_timeout(job->conn, NET_IO_TIMEOUT_SEC) != 0) {
-      net_close(job->conn);
-      conn_release(sp);
-      free(job);
       continue;
     }
     if (pthread_create(&th, NULL, connection_worker, job) != 0) {
