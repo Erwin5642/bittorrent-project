@@ -41,9 +41,9 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[PING] = 0,
 	[PONG] = 0,
 	[LEAVE] = 32,
-	[LOOKUP] = -1,
+	[LOOKUP] = METADATA_FILENAME_MAX,
 	[STORE] = -1,
-	[DOWNLOAD_REQ] = -1,
+	[DOWNLOAD_REQ] = DOWNLOAD_REQ_WIRE_SIZE,
 	[DOWNLOAD_REP] = -1,
 	[PREPARE] = -1,
 	[COMMIT] = -1,
@@ -71,9 +71,30 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [PONG]  = "PONG",
     [JOIN]  = "JOIN",
     [LEAVE] = "LEAVE",
+    [LOOKUP] = "LOOKUP",
+    [STORE] = "STORE",
+    [DOWNLOAD_REQ] = "DOWNLOAD_REQ",
+    [DOWNLOAD_REP] = "DOWNLOAD_REP",
     [ACK]   = "ACK",
     [ERROR] = "ERROR",
 };
+
+/* STORE/LOOKUP/DOWNLOAD_* carregam bytes crus e podem passar do teto de controle. */
+static int payload_is_data(uint16_t t) {
+	return t == STORE || t == LOOKUP || t == DOWNLOAD_REQ || t == DOWNLOAD_REP;
+}
+
+static uint32_t payload_ceiling(uint16_t t) {
+	return payload_is_data(t) ? MAX_DATA_PAYLOAD_SZ : MAX_CONTROL_PAYLOAD_SZ;
+}
+
+static int payload_crc_ok(uint32_t expect, const uint8_t *payload, uint32_t len) {
+	uLong crc = crc32(0L, Z_NULL, 0);
+
+	if (len > 0)
+		crc = crc32(crc, (const Bytef *)payload, len);
+	return (uint32_t)crc == expect;
+}
 
 const char *message_type_name(uint16_t t) {
     if (t >= MSG_TYPE_MAX || !type_names[t])
@@ -363,6 +384,143 @@ int metadata_unpack(file_metadata_t *out, const uint8_t *in, size_t in_len) {
 	return 1;
 }
 
+/* LOOKUP: filename em campo fixo de METADATA_FILENAME_MAX, resto zerado. */
+ssize_t lookup_pack(const char *filename, uint8_t *out, size_t out_cap) {
+	size_t n;
+
+	if (!metadata_name_ok(filename) || !out || out_cap < METADATA_FILENAME_MAX)
+		return -1;
+	memset(out, 0, METADATA_FILENAME_MAX);
+	n = strlen(filename);
+	memcpy(out, filename, n + 1);
+	return (ssize_t)METADATA_FILENAME_MAX;
+}
+
+int lookup_unpack(char *filename, size_t filename_cap, const uint8_t *in, size_t in_len) {
+	if (!filename || filename_cap < METADATA_FILENAME_MAX || !in ||
+	    in_len != METADATA_FILENAME_MAX)
+		return 0;
+	memcpy(filename, in, METADATA_FILENAME_MAX);
+	filename[METADATA_FILENAME_MAX - 1] = '\0';
+	return metadata_name_ok(filename);
+}
+
+/* DOWNLOAD_REQ: 32 bytes de ObjectID + uint32 big-endian. */
+ssize_t download_req_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
+                          uint8_t *out, size_t out_cap) {
+	uint32_t temp_32;
+
+	if (!object_id || metadata_id_is_zero(object_id) || !out ||
+	    out_cap < DOWNLOAD_REQ_WIRE_SIZE)
+		return -1;
+	memcpy(out, object_id, METADATA_OBJECT_ID_SIZE);
+	temp_32 = htonl(chunk_index);
+	memcpy(out + METADATA_OBJECT_ID_SIZE, &temp_32, sizeof temp_32);
+	return (ssize_t)DOWNLOAD_REQ_WIRE_SIZE;
+}
+
+int download_req_unpack(uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t *chunk_index,
+                        const uint8_t *in, size_t in_len) {
+	uint32_t temp_32;
+
+	if (!object_id || !chunk_index || !in || in_len != DOWNLOAD_REQ_WIRE_SIZE)
+		return 0;
+	memcpy(object_id, in, METADATA_OBJECT_ID_SIZE);
+	if (metadata_id_is_zero(object_id))
+		return 0;
+	memcpy(&temp_32, in + METADATA_OBJECT_ID_SIZE, sizeof temp_32);
+	*chunk_index = ntohl(temp_32);
+	return 1;
+}
+
+/* 0 se o bloco comprimido nao cabe no teto de dados. */
+size_t download_rep_wire_size(uint32_t comp_len) {
+	size_t total;
+
+	if (comp_len == 0)
+		return 0;
+	total = (size_t)CHUNK_WIRE_PREFIX + (size_t)comp_len;
+	if (total > MAX_DATA_PAYLOAD_SZ)
+		return 0;
+	return total;
+}
+
+/*
+ * DOWNLOAD_REP: object_id, indice, tamanho original, tamanho comprimido
+ * (uint32 big-endian) e, em seguida, os bytes LZ4.
+ */
+ssize_t download_rep_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
+                          uint32_t original_len, const uint8_t *comp, uint32_t comp_len,
+                          uint8_t *out, size_t out_cap) {
+	size_t need;
+	uint32_t temp_32;
+	uint8_t *pt;
+
+	if (!object_id || metadata_id_is_zero(object_id) || !comp || !out)
+		return -1;
+	if (original_len == 0 || original_len > CHUNK_PLAIN_MAX)
+		return -1;
+	need = download_rep_wire_size(comp_len);
+	if (need == 0 || out_cap < need)
+		return -1;
+
+	pt = out;
+	memcpy(pt, object_id, METADATA_OBJECT_ID_SIZE);
+	pt += METADATA_OBJECT_ID_SIZE;
+	temp_32 = htonl(chunk_index);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	pt += sizeof temp_32;
+	temp_32 = htonl(original_len);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	pt += sizeof temp_32;
+	temp_32 = htonl(comp_len);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	pt += sizeof temp_32;
+	memcpy(pt, comp, comp_len);
+	return (ssize_t)need;
+}
+
+int download_rep_unpack(uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t *chunk_index,
+                        uint32_t *original_len, const uint8_t **comp, uint32_t *comp_len,
+                        const uint8_t *in, size_t in_len) {
+	uint32_t temp_32;
+	uint32_t index;
+	uint32_t plain;
+	uint32_t clen;
+	const uint8_t *pt;
+
+	if (!object_id || !chunk_index || !original_len || !comp || !comp_len || !in ||
+	    in_len < CHUNK_WIRE_PREFIX)
+		return 0;
+
+	pt = in;
+	memcpy(object_id, pt, METADATA_OBJECT_ID_SIZE);
+	pt += METADATA_OBJECT_ID_SIZE;
+	if (metadata_id_is_zero(object_id))
+		return 0;
+
+	memcpy(&temp_32, pt, sizeof temp_32);
+	index = ntohl(temp_32);
+	pt += sizeof temp_32;
+	memcpy(&temp_32, pt, sizeof temp_32);
+	plain = ntohl(temp_32);
+	pt += sizeof temp_32;
+	memcpy(&temp_32, pt, sizeof temp_32);
+	clen = ntohl(temp_32);
+	pt += sizeof temp_32;
+
+	if (plain == 0 || plain > CHUNK_PLAIN_MAX)
+		return 0;
+	if (download_rep_wire_size(clen) != in_len)
+		return 0;
+
+	*chunk_index = index;
+	*original_len = plain;
+	*comp_len = clen;
+	*comp = pt;
+	return 1;
+}
+
 /* Le o header de 99 bytes do buffer, convertendo os campos de big-endian. */
 int unpack_header(pl_header* out_st, const uint8_t* in_msg){
 	const uint8_t* pt = in_msg;
@@ -530,7 +688,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
                 message_type_name(message_type));
         return NET_ERROR;
     }
-    if (payload_size > MAX_CONTROL_PAYLOAD_SZ)
+    if (payload_size > payload_ceiling(message_type))
         return NET_ERROR;
     if (buf_len < (size_t)HEADER_SIZE + (size_t)payload_size)
         return NET_ERROR;
@@ -553,7 +711,9 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
         break;
     case STORE:
     case LOOKUP:
-        break;   /* payload variavel; o handler desserializa (ex.: metadata_unpack) */
+    case DOWNLOAD_REQ:
+    case DOWNLOAD_REP:
+        break;   /* payload cru; o handler desserializa (metadata_unpack, download_rep_unpack) */
     default:
         return NET_ERROR;
     }
@@ -578,11 +738,15 @@ int send_message(const int fd, uint8_t *out_msg_buffer, const size_t buf_size,
 /*
  * Le o header, valida versao/tipo/pl_size, le o payload, confere o CRC32 e
  * desserializa para struct_payload. Devolve msg_t com header, payload e status.
+ *
+ * STORE/LOOKUP/DOWNLOAD_* sao lidos por inteiro (ate MAX_DATA_PAYLOAD_SZ) e
+ * devolvidos crus em in_msg_buffer. GOSSIP, STATE_TRANSFER e SNAPSHOT continuam
+ * sem leitura do corpo: o layout deles pertence aos checkpoints seguintes.
  */
 msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
                    void *struct_payload, size_t struct_size){
 
-	uint8_t frame[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+	uint8_t header_buf[HEADER_SIZE];
 	pl_header msg_header;
 	int status;
 	int decoded;
@@ -590,11 +754,10 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 	uint16_t message_type;
 	size_t struct_need = 0;
 
-	/* 1) header de tamanho fixo; o payload entra logo depois, no mesmo frame. */
-	if((status = recv_all(fd, frame, HEADER_SIZE)) != NET_OK)
+	if((status = recv_all(fd, header_buf, HEADER_SIZE)) != NET_OK)
 		return (msg_t){{0}, NULL, status};
 
-	if (unpack_header(&msg_header, frame) != 0)
+	if (unpack_header(&msg_header, header_buf) != 0)
 		return (msg_t){{0}, NULL, NET_ERROR};
 
 	if (msg_header.protocol_ver != PROTOCOL_VER) {
@@ -609,28 +772,37 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 		return (msg_t){{0}, NULL, NET_ERROR};
 	}
 
+	/* Layout ainda indefinido (CP4/CP5): nao consome o corpo. */
+	if (message_type == GOSSIP || message_type == STATE_TRANSFER || message_type == SNAPSHOT)
+		return (msg_t){msg_header, struct_payload, NET_OK};
+
+	if (payload_size > payload_ceiling(message_type) ||
+	    (payload_sizes[message_type] >= 0 &&
+	     payload_size != (uint32_t)payload_sizes[message_type])) {
+		fprintf(stderr, "recv_message # corrupted header");
+		return (msg_t){{0}, NULL, NET_ERROR};
+	}
+	if (payload_size > 0 && (!in_msg_buffer || in_buf_size < payload_size)) {
+		fprintf(stderr, "recv_message # buffer curto");
+		return (msg_t){msg_header, NULL, NET_ERROR};
+	}
+
 	/*
-	 * Tipos de payload variavel (CP2+) ficam fora da validacao de tamanho fixo.
-	 * STORE/LOOKUP cabem no teto de controle e entram por este ramo (payload lido
-	 * e copiado; deserialize_message desserializa).
-	 *
-	 * BUG conhecido (contrato C5, a corrigir antes do download): DOWNLOAD_REQ,
-	 * DOWNLOAD_REP, GOSSIP, STATE_TRANSFER e SNAPSHOT sao pulados aqui e a funcao
-	 * retorna NET_OK sem ler os pl_size bytes do socket, dessincronizando o stream.
-	 * O conserto depende do design de payload grande (>MAX_CONTROL_PAYLOAD_SZ),
-	 * que vem junto com a transferencia de chunks.
+	 * Acima do teto de controle o frame nao cabe na pilha. O corpo vai direto
+	 * para o buffer do caller; o CRC e conferido aqui, sem deserialize_message.
 	 */
-	if(message_type != DOWNLOAD_REP && message_type != DOWNLOAD_REQ &&  message_type != GOSSIP && message_type != STATE_TRANSFER && message_type != SNAPSHOT){
-		if (payload_size > MAX_CONTROL_PAYLOAD_SZ ||
-		    (payload_sizes[message_type] >= 0 &&
-		     payload_size != (uint32_t)payload_sizes[message_type])) {
-			fprintf(stderr, "recv_message # corrupted header");
-			return (msg_t){{0}, NULL, NET_ERROR};
-		}
-		if (payload_size > 0 && (!in_msg_buffer || in_buf_size < payload_size)) {
-			fprintf(stderr, "recv_message # buffer curto");
-			return (msg_t){msg_header, NULL, NET_ERROR};
-		}
+	if (payload_size > MAX_CONTROL_PAYLOAD_SZ) {
+		if ((status = recv_all(fd, in_msg_buffer, payload_size)) != NET_OK)
+			return (msg_t){{0}, NULL, status};
+		if (!payload_crc_ok(msg_header.checksum, in_msg_buffer, payload_size))
+			return (msg_t){msg_header, in_msg_buffer, NET_CORRUPTED_MSG};
+		return (msg_t){msg_header, in_msg_buffer, NET_OK};
+	}
+
+	{
+		uint8_t frame[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+
+		memcpy(frame, header_buf, HEADER_SIZE);
 		if((status = recv_all(fd, frame + HEADER_SIZE, payload_size))!= NET_OK)
 			return (msg_t){{0}, NULL, status};
 		if (payload_size > 0)
@@ -654,33 +826,43 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 	return (msg_t){msg_header, struct_payload, NET_OK};
 }
 
-/* Variante de send_message para um payload de bytes arbitrario. */
+/* Variante de send_message para um payload de bytes ja empacotados. */
 int simple_send(int fd, uint8_t* out_msg_buffer, const uint8_t* payload, uint32_t str_size, pl_header* msg_header){
 
 	int status;
-	uint8_t* buffer_pointer = out_msg_buffer;
-	uint16_t message_type = msg_header->msg_type;
-	uint32_t payload_size = msg_header->pl_size;
-	uLong crc = crc32(0L, Z_NULL, 0);
-	crc = crc32(crc, (const Bytef *)payload, payload_size);
-	msg_header->checksum = crc;
+	uint8_t* buffer_pointer;
+	uint16_t message_type;
+	uint32_t payload_size;
+	uLong crc;
 
-	pack_header(msg_header, buffer_pointer);
-	buffer_pointer += HEADER_SIZE;
+	if (!out_msg_buffer || !msg_header)
+		return NET_ERROR;
+
+	message_type = msg_header->msg_type;
+	payload_size = msg_header->pl_size;
 
 	if(message_type >= MSG_TYPE_MAX){
-		fprintf(stderr, "recv_message # corrupted header");
-		status = NET_ERROR; // TODO: add more error status types for logging
-		return status;
+		fprintf(stderr, "simple_send # tipo invalido\n");
+		return NET_ERROR;
 	}
+	if(payload_size > payload_ceiling(message_type) || str_size != payload_size){
+		fprintf(stderr, "simple_send # tamanho invalido\n");
+		return NET_ERROR;
+	}
+	if (payload_size > 0 && !payload)
+		return NET_ERROR;
 
-	if(payload_size > MAX_CONTROL_PAYLOAD_SZ || str_size != payload_size){
-		fprintf(stderr, "recv_message # corrupted header");
-		status = NET_ERROR; 
-		return status;
-	}
-	
-	memcpy(buffer_pointer, payload, str_size);
+	crc = crc32(0L, Z_NULL, 0);
+	if (payload_size > 0)
+		crc = crc32(crc, (const Bytef *)payload, payload_size);
+	msg_header->checksum = (uint32_t)crc;
+
+	buffer_pointer = out_msg_buffer;
+	if (pack_header(msg_header, buffer_pointer) != 0)
+		return NET_ERROR;
+	buffer_pointer += HEADER_SIZE;
+	if (payload_size > 0)
+		memcpy(buffer_pointer, payload, str_size);
 
 	if((status = send_all(fd, out_msg_buffer, HEADER_SIZE + payload_size)) != NET_OK)
 		return status;
@@ -691,38 +873,37 @@ int simple_send(int fd, uint8_t* out_msg_buffer, const uint8_t* payload, uint32_
 /* Variante de recv_message para um payload de bytes arbitrario. */
 msg_t simple_recv(int fd, uint8_t* payload, uint32_t str_size){
 	uint8_t header_buffer[HEADER_SIZE];
-
+	pl_header msg_header;
 	int status;
-	
+	uint32_t payload_size;
+	uint16_t message_type;
+
 	if((status = recv_all(fd, header_buffer, HEADER_SIZE)) != NET_OK)
 		return (msg_t){{0}, NULL, status};
 
-	pl_header msg_header;
+	if (unpack_header(&msg_header, header_buffer) != 0)
+		return (msg_t){{0}, NULL, NET_ERROR};
 
-	unpack_header(&msg_header, header_buffer);
-	
-	uint32_t payload_size = msg_header.pl_size;
-	uint16_t message_type = msg_header.msg_type;
+	payload_size = msg_header.pl_size;
+	message_type = msg_header.msg_type;
 
 	if(message_type >= MSG_TYPE_MAX){
-		fprintf(stderr, "recv_message # corrupted header");
-		status = NET_ERROR; // TODO: add more error status types for logging
-		return (msg_t){{0}, NULL, status};
+		fprintf(stderr, "simple_recv # tipo invalido\n");
+		return (msg_t){{0}, NULL, NET_ERROR};
 	}
 
-	if(payload_size > str_size){ 
-		fprintf(stderr, "recv_message # corrupted header");
-		status = NET_ERROR; 
-		return (msg_t){{0}, NULL, status};
+	if(payload_size > payload_ceiling(message_type) || payload_size > str_size){
+		fprintf(stderr, "simple_recv # tamanho invalido\n");
+		return (msg_t){{0}, NULL, NET_ERROR};
 	}
+	if (payload_size > 0 && !payload)
+		return (msg_t){msg_header, NULL, NET_ERROR};
 	if((status = recv_all(fd, payload, payload_size))!= NET_OK)
 		return (msg_t){{0}, NULL, status};
-			
-	uLong crc = crc32(0L, Z_NULL, 0);
-	crc = crc32(crc, (const Bytef *)payload, payload_size);
-	if(msg_header.checksum != (uint32_t)crc)
-		return (msg_t){msg_header, payload, NET_ERROR};
-	return (msg_t){msg_header, payload, NET_OK}; 
+
+	if (!payload_crc_ok(msg_header.checksum, payload, payload_size))
+		return (msg_t){msg_header, payload, NET_CORRUPTED_MSG};
+	return (msg_t){msg_header, payload, NET_OK};
 }
 
 /* Monta um header de resposta: ecoa o TransactionID e troca src/dst. */

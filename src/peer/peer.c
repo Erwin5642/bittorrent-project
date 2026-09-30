@@ -4,13 +4,14 @@
  * de controle (ping/join/leave) e imprime a resposta. Exercita a ponta cliente
  * do protocolo definido em protocol.c/network.c.
  */
+#include <netinet/in.h>
+
 #include "../../include/common/network.h"
 #include "../../include/common/protocol.h"
 #include "../../include/common/node.h"
 #include "../../include/common/config.h"
 #include "../../include/peer/upload.h"
 #include "../../include/peer/download.h"
-#include "../../include/peer/storage.h"
 
 #include <getopt.h>
 #include <signal.h>
@@ -20,7 +21,6 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <time.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 
 typedef struct {
@@ -94,37 +94,46 @@ int peer_init(peer_t* peer, const char *conf_path){
 #define PEER_CONF "config/peer1.conf"
 #define STORAGE_ROOT "storage"
 
-/* Registra o metadado no Super Peer de bootstrap via STORE. Best-effort. */
-static void store_to_superpeer(const peer_t *self, const node_config_t *cfg,
-                               const file_metadata_t *meta) {
-	char host[INET_ADDRSTRLEN];
-	uint16_t port;
-	size_t wire;
-	uint8_t payload[MAX_CONTROL_PAYLOAD_SZ];
-	uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
-	pl_header h;
-	int fd;
-
-	if (cfg->bootstrap_count <= 0) {
-		printf("(sem bootstrap no .conf; metadado nao enviado ao Super Peer)\n");
-		return;
+/* Host/porta do Super Peer: --port explicito, senao bootstrap[0] do .conf. */
+static int peer_endpoint(const node_config_t *cfg, const char *host_opt, long port_opt,
+                         char *host_out, size_t host_cap, uint16_t *port_out) {
+	if (port_opt != 0) {
+		snprintf(host_out, host_cap, "%s", host_opt ? host_opt : "127.0.0.1");
+		*port_out = (uint16_t)port_opt;
+		return 1;
 	}
-	port = cfg->bootstrap[0].port;
-	if (!inet_ntop(AF_INET, &cfg->bootstrap[0].ipv4, host, sizeof host))
-		return;
+	if (!cfg || cfg->bootstrap_count <= 0)
+		return 0;
+	if (!inet_ntop(AF_INET, &cfg->bootstrap[0].ipv4, host_out, host_cap))
+		return 0;
+	*port_out = cfg->bootstrap[0].port;
+	return *port_out != 0;
+}
+
+/* Registra o metadado no Super Peer. 1 so com ACK. */
+static int store_to_superpeer(const peer_t *self, const char *host, uint16_t port,
+                              const file_metadata_t *meta) {
+	size_t wire;
+	uint8_t payload[METADATA_PAYLOAD_MAX];
+	uint8_t buf[HEADER_SIZE + METADATA_PAYLOAD_MAX];
+	uint8_t reply[MAX_CONTROL_PAYLOAD_SZ];
+	pl_header h;
+	msg_t r;
+	int fd;
+	int ok = 0;
 
 	wire = metadata_wire_size(meta->chunk_count);
 	if (wire == 0 || wire > sizeof payload) {
-		fprintf(stderr, "STORE: metadado nao cabe no payload de controle\n");
-		return;
+		fprintf(stderr, "STORE: metadado nao cabe no payload\n");
+		return 0;
 	}
 	if (metadata_pack(meta, payload, sizeof payload) != (ssize_t)wire)
-		return;
+		return 0;
 
 	fd = net_connect(host, port);
 	if (fd < 0) {
 		fprintf(stderr, "STORE: nao conectou ao Super Peer %s:%u\n", host, port);
-		return;
+		return 0;
 	}
 
 	memset(&h, 0, sizeof h);
@@ -135,26 +144,28 @@ static void store_to_superpeer(const peer_t *self, const node_config_t *cfg,
 	memcpy(h.src_node, self->node_id.bytes, NODE_ID_SIZE);
 
 	if (simple_send(fd, buf, payload, (uint32_t)wire, &h) == NET_OK) {
-		uint8_t reply[MAX_CONTROL_PAYLOAD_SZ];
-		msg_t r;
 		printf("TX STORE\n");
 		r = simple_recv(fd, reply, sizeof reply);
-		if (r.status == NET_OK)
+		if (r.status == NET_OK && r.header.msg_type == ACK) {
 			printf("RX %s\n", message_type_name(r.header.msg_type));
-		else
-			fprintf(stderr, "STORE: sem resposta valida do Super Peer\n");
+			ok = 1;
+		} else {
+			fprintf(stderr, "STORE: Super Peer recusou o metadado\n");
+		}
 	}
 	net_close(fd);
+	return ok;
 }
 
 /* Identidade do peer: usa o .conf se houver, senão gera um NodeID efêmero. */
-static void peer_identity(peer_t *self, node_config_t *cfg) {
+static void peer_identity(peer_t *self, node_config_t *cfg, const char *conf) {
 	node_uuid_t uuid;
+	const char *path = conf ? conf : PEER_CONF;
 
-	if (peer_init(self, PEER_CONF) && node_config_load(PEER_CONF, cfg))
+	if (peer_init(self, path) && node_config_load(path, cfg))
 		return;
 
-	/* Sem config: identidade efêmera, sem bootstrap. Pipeline local ainda roda. */
+	/* Sem config: identidade efêmera, sem bootstrap. */
 	memset(cfg, 0, sizeof *cfg);
 	memset(self, 0, sizeof *self);
 	self->type = PEER;
@@ -162,26 +173,23 @@ static void peer_identity(peer_t *self, node_config_t *cfg) {
 		node_id_generate(0, 0, &uuid, &self->node_id);
 }
 
-/* Grava o metadado empacotado no índice local, para o download resolver por nome. */
-static void index_metadata(const file_metadata_t *meta) {
-	uint8_t wire[METADATA_PAYLOAD_MAX];
-	ssize_t n = metadata_pack(meta, wire, sizeof wire);
-
-	if (n > 0)
-		storage_put_meta(STORAGE_ROOT, meta->filename, wire, (size_t)n);
-}
-
 /* Subcomando: --cmd upload --file <arquivo> */
-static int cmd_upload(const char *file) {
+static int cmd_upload(const char *file, const char *conf, const char *host_opt, long port_opt) {
 	peer_t self;
 	node_config_t cfg;
 	file_metadata_t meta;
+	char host[INET_ADDRSTRLEN];
+	uint16_t port = 0;
 
 	if (!file) {
 		fprintf(stderr, "upload: faltou --file <arquivo>\n");
 		return 1;
 	}
-	peer_identity(&self, &cfg);
+	peer_identity(&self, &cfg, conf);
+	if (!peer_endpoint(&cfg, host_opt, port_opt, host, sizeof host, &port)) {
+		fprintf(stderr, "upload: sem Super Peer (use --port ou bootstrap no .conf)\n");
+		return 1;
+	}
 
 	if (!upload_prepare(file, STORAGE_ROOT, &self.node_id, &meta)) {
 		fprintf(stderr, "upload: falha ao processar %s\n", file);
@@ -189,19 +197,34 @@ static int cmd_upload(const char *file) {
 	}
 
 	upload_print_report(&meta);
-	index_metadata(&meta);
-	store_to_superpeer(&self, &cfg, &meta);
+	if (!store_to_superpeer(&self, host, port, &meta) ||
+	    !upload_send_chunks(host, port, &self.node_id, &meta, STORAGE_ROOT)) {
+		fprintf(stderr, "upload: falha ao publicar %s\n", file);
+		metadata_release(&meta);
+		return 1;
+	}
 	metadata_release(&meta);
 	return 0;
 }
 
 /* Subcomando: --cmd download --name <nome> --output <saida> */
-static int cmd_download(const char *name, const char *output) {
+static int cmd_download(const char *name, const char *output, const char *conf,
+                        const char *host_opt, long port_opt) {
+	peer_t self;
+	node_config_t cfg;
+	char host[INET_ADDRSTRLEN];
+	uint16_t port = 0;
+
 	if (!name || !output) {
 		fprintf(stderr, "download: faltou --name <nome> e/ou --output <saida>\n");
 		return 1;
 	}
-	if (!download_file(name, output, STORAGE_ROOT)) {
+	peer_identity(&self, &cfg, conf);
+	if (!peer_endpoint(&cfg, host_opt, port_opt, host, sizeof host, &port)) {
+		fprintf(stderr, "download: sem Super Peer (use --port ou bootstrap no .conf)\n");
+		return 1;
+	}
+	if (!download_from_superpeer(host, port, &self.node_id, name, output)) {
 		fprintf(stderr, "download: falha ao baixar %s\n", name);
 		return 1;
 	}
@@ -218,6 +241,7 @@ int main(int argc, char* argv[]){
     const char *file = NULL;
     const char *name = NULL;
     const char *output = NULL;
+    const char *conf = NULL;
     long port = 0;
 
     static struct option long_opts[] = {
@@ -227,17 +251,19 @@ int main(int argc, char* argv[]){
         {"file",   required_argument, NULL, 'f'},
         {"name",   required_argument, NULL, 'n'},
         {"output", required_argument, NULL, 'o'},
+        {"config", required_argument, NULL, 'g'},
         {NULL,     0,                 NULL,  0 }
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'c': cmd = optarg; break;
         case 'h': host = optarg; break;
         case 'f': file = optarg; break;
         case 'n': name = optarg; break;
         case 'o': output = optarg; break;
+        case 'g': conf = optarg; break;
         case 'p': {
             char *end;
             port = strtol(optarg, &end, 10);
@@ -258,11 +284,11 @@ int main(int argc, char* argv[]){
         return 1;
     }
 
-    /* Subcomandos de arquivo do CP2. */
+    /* Subcomandos de arquivo do CP2. Sem --port, usam o bootstrap do .conf. */
     if (strcmp(cmd, "upload") == 0)
-        return cmd_upload(file);
+        return cmd_upload(file, conf, host, port);
     if (strcmp(cmd, "download") == 0)
-        return cmd_download(name, output);
+        return cmd_download(name, output, conf, host, port);
 
     /* Comandos de controle do CP1 (ping/join/leave) exigem host/porta. */
     if (port == 0) {
@@ -279,7 +305,7 @@ int main(int argc, char* argv[]){
     }
 
     peer_t self;
-    if (!peer_init(&self, "config/peer1.conf"))
+    if (!peer_init(&self, conf ? conf : PEER_CONF))
         return 1;
 
     int fd = net_connect(host, (uint16_t)port);

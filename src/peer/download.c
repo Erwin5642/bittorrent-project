@@ -15,8 +15,13 @@
 #include "../../include/peer/file_pipeline.h"
 #include "../../include/peer/storage.h"
 #include "../../include/common/compression.h"
+#include <netinet/in.h>
+
+#include "../../include/common/network.h"
 #include "../../include/common/node.h"
 #include "../../include/common/protocol.h"
+
+#include <time.h>
 
 /** Número de threads na transferência paralela de chunks. */
 #define TRANSFER_WORKERS 4
@@ -144,6 +149,210 @@ int download_file(const char *name, const char *output, const char *storage_root
 	}
 
 	/* Verificação final: SHA-256 do arquivo remontado == ObjectID. */
+	if (!sha256(out_buf, (size_t)meta.size, digest) ||
+	    memcmp(digest, meta.object_id, NODE_ID_SIZE) != 0) {
+		fprintf(stderr, "download: SHA-256 do arquivo nao confere com o ObjectID\n");
+		goto done;
+	}
+	if (!write_file(output, out_buf, (size_t)meta.size)) {
+		fprintf(stderr, "download: falha ao gravar %s\n", output);
+		goto done;
+	}
+
+	printf("Download completed\n");
+	printf("SHA-256 verified\n");
+	fflush(stdout);
+	rc = 1;
+
+done:
+	free(out_buf);
+	metadata_release(&meta);
+	return rc;
+}
+
+/* Pede um chunk ao Super Peer, descomprime e confere o hash. */
+typedef struct {
+	const char *host;
+	uint16_t port;
+	const node_id_t *self;
+	const file_metadata_t *meta;
+	uint8_t *out_buf;
+	uint32_t start;
+	uint32_t workers;
+	int ok;
+} fetch_task_t;
+
+static int fetch_one_chunk(const fetch_task_t *t, uint32_t index) {
+	size_t off = (size_t)index * CHUNK_SIZE;
+	size_t expect = t->meta->size - off < CHUNK_SIZE ? (size_t)(t->meta->size - off) : CHUNK_SIZE;
+	uint8_t req[DOWNLOAD_REQ_WIRE_SIZE];
+	uint8_t *req_frame = NULL;
+	uint8_t *reply = NULL;
+	pl_header hdr;
+	msg_t r;
+	uint8_t object_id[METADATA_OBJECT_ID_SIZE];
+	uint32_t got_index = 0;
+	uint32_t original_len = 0;
+	uint32_t comp_len = 0;
+	const uint8_t *comp = NULL;
+	size_t plain_len = 0;
+	uint8_t digest[NODE_ID_SIZE];
+	int fd = -1;
+	int ok = 0;
+
+	if (expect == 0 || download_req_pack(t->meta->object_id, index, req, sizeof req) < 0)
+		return 0;
+	req_frame = malloc(HEADER_SIZE + sizeof req);
+	reply = malloc(MAX_DATA_PAYLOAD_SZ);
+	if (!req_frame || !reply)
+		goto done;
+
+	fd = net_connect(t->host, t->port);
+	if (fd < 0)
+		goto done;
+
+	memset(&hdr, 0, sizeof hdr);
+	hdr.protocol_ver = PROTOCOL_VER;
+	hdr.msg_type = DOWNLOAD_REQ;
+	hdr.time = (uint64_t)time(NULL);
+	hdr.pl_size = DOWNLOAD_REQ_WIRE_SIZE;
+	memcpy(hdr.src_node, t->self->bytes, NODE_ID_SIZE);
+	if (simple_send(fd, req_frame, req, DOWNLOAD_REQ_WIRE_SIZE, &hdr) != NET_OK)
+		goto done;
+
+	r = simple_recv(fd, reply, MAX_DATA_PAYLOAD_SZ);
+	if (r.status != NET_OK || r.header.msg_type != DOWNLOAD_REP)
+		goto done;
+	if (!download_rep_unpack(object_id, &got_index, &original_len, &comp, &comp_len,
+	                         reply, r.header.pl_size))
+		goto done;
+	if (got_index != index || original_len != expect ||
+	    memcmp(object_id, t->meta->object_id, METADATA_OBJECT_ID_SIZE) != 0)
+		goto done;
+	if (lz4_decompress(comp, comp_len, t->out_buf + off, expect, &plain_len) != COMP_OK ||
+	    plain_len != expect)
+		goto done;
+	if (!sha256(t->out_buf + off, plain_len, digest) ||
+	    memcmp(digest, t->meta->chunk_hashes + (size_t)index * NODE_ID_SIZE, NODE_ID_SIZE) != 0)
+		goto done;
+	ok = 1;
+
+done:
+	if (fd >= 0)
+		net_close(fd);
+	free(reply);
+	free(req_frame);
+	return ok;
+}
+
+static void *fetch_worker(void *arg) {
+	fetch_task_t *t = arg;
+	uint32_t i;
+
+	for (i = t->start; i < t->meta->chunk_count; i += t->workers) {
+		if (!fetch_one_chunk(t, i)) {
+			t->ok = 0;
+			return NULL;
+		}
+	}
+	t->ok = 1;
+	return NULL;
+}
+
+static int fetch_chunks(const char *host, uint16_t port, const node_id_t *self,
+                        const file_metadata_t *meta, uint8_t *out_buf) {
+	pthread_t th[TRANSFER_WORKERS];
+	fetch_task_t task[TRANSFER_WORKERS];
+	uint32_t nw;
+	uint32_t spawned = 0;
+	uint32_t w;
+	int all_ok = 1;
+
+	nw = meta->chunk_count < TRANSFER_WORKERS ? meta->chunk_count : TRANSFER_WORKERS;
+	for (w = 0; w < nw; w++) {
+		task[w] = (fetch_task_t){host, port, self, meta, out_buf, w, nw, 0};
+		if (pthread_create(&th[w], NULL, fetch_worker, &task[w]) != 0) {
+			all_ok = 0;
+			break;
+		}
+		spawned++;
+	}
+	for (w = 0; w < spawned; w++) {
+		pthread_join(th[w], NULL);
+		if (!task[w].ok)
+			all_ok = 0;
+	}
+	return all_ok && spawned == nw;
+}
+
+static int lookup_meta(const char *host, uint16_t port, const node_id_t *self,
+                       const char *name, file_metadata_t *meta) {
+	uint8_t payload[METADATA_FILENAME_MAX];
+	uint8_t frame[HEADER_SIZE + METADATA_FILENAME_MAX];
+	uint8_t reply[METADATA_PAYLOAD_MAX];
+	pl_header hdr;
+	msg_t r;
+	ssize_t n;
+	int fd;
+	int ok = 0;
+
+	n = lookup_pack(name, payload, sizeof payload);
+	if (n < 0)
+		return 0;
+	fd = net_connect(host, port);
+	if (fd < 0)
+		return 0;
+
+	memset(&hdr, 0, sizeof hdr);
+	hdr.protocol_ver = PROTOCOL_VER;
+	hdr.msg_type = LOOKUP;
+	hdr.time = (uint64_t)time(NULL);
+	hdr.pl_size = (uint32_t)n;
+	memcpy(hdr.src_node, self->bytes, NODE_ID_SIZE);
+	if (simple_send(fd, frame, payload, (uint32_t)n, &hdr) == NET_OK) {
+		r = simple_recv(fd, reply, sizeof reply);
+		if (r.status == NET_OK && r.header.msg_type == STORE &&
+		    metadata_unpack(meta, reply, r.header.pl_size))
+			ok = 1;
+	}
+	net_close(fd);
+	return ok;
+}
+
+int download_from_superpeer(const char *host, uint16_t port, const node_id_t *self,
+                            const char *name, const char *output) {
+	file_metadata_t meta;
+	uint8_t *out_buf = NULL;
+	uint8_t digest[NODE_ID_SIZE];
+	int rc = 0;
+
+	if (!host || !self || !name || !output || port == 0)
+		return 0;
+
+	metadata_init(&meta);
+	if (!lookup_meta(host, port, self, name, &meta)) {
+		fprintf(stderr, "download: LOOKUP de '%s' falhou\n", name);
+		return 0;
+	}
+
+	if (meta.size == 0) {
+		if (sha256(NULL, 0, digest) && memcmp(digest, meta.object_id, NODE_ID_SIZE) == 0 &&
+		    write_file(output, NULL, 0)) {
+			printf("Download completed\n");
+			printf("SHA-256 verified\n");
+			rc = 1;
+		}
+		metadata_release(&meta);
+		return rc;
+	}
+
+	out_buf = malloc((size_t)meta.size);
+	if (!out_buf)
+		goto done;
+	if (!fetch_chunks(host, port, self, &meta, out_buf)) {
+		fprintf(stderr, "download: falha na transferencia/verificacao dos chunks\n");
+		goto done;
+	}
 	if (!sha256(out_buf, (size_t)meta.size, digest) ||
 	    memcmp(digest, meta.object_id, NODE_ID_SIZE) != 0) {
 		fprintf(stderr, "download: SHA-256 do arquivo nao confere com o ObjectID\n");
