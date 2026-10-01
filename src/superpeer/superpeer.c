@@ -5,6 +5,7 @@
 #include "common/config.h"
 #include "common/network.h"
 #include "common/node.h"
+#include "peer/storage.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -358,11 +359,162 @@ static void sleep_ms(unsigned ms) {
   nanosleep(&ts, NULL);
 }
 
+/** Chunks ficam no storage do processo; o peer só guarda o metadado na tabela. */
+#define SUPERPEER_STORAGE_ROOT "data/storage"
+
 typedef struct {
   superpeer_t *sp;
   int conn;
   struct sockaddr_in peer_addr;
 } conn_job_t;
+
+/* Tamanho original do chunk `index` a partir do tamanho do arquivo. */
+static uint32_t chunk_plain_len(const file_metadata_t *meta, uint32_t index) {
+  uint64_t off;
+  uint64_t remain;
+
+  if (!meta || (uint64_t)index * CHUNK_PLAIN_MAX >= meta->size)
+    return 0;
+  off = (uint64_t)index * CHUNK_PLAIN_MAX;
+  remain = meta->size - off;
+  if (remain > CHUNK_PLAIN_MAX)
+    remain = CHUNK_PLAIN_MAX;
+  return (uint32_t)remain;
+}
+
+/* Envia um payload cru (STORE ou DOWNLOAD_REP) como resposta. */
+static int send_raw(int fd, const pl_header *req, const node_id_t *self, uint16_t type,
+                    const uint8_t *payload, uint32_t len) {
+  uint8_t *buf;
+  pl_header hdr;
+  int rc;
+
+  buf = malloc((size_t)HEADER_SIZE + (size_t)len);
+  if (!buf)
+    return NET_ERROR;
+  fill_reply_header(&hdr, req, self, type, len);
+  rc = simple_send(fd, buf, payload, len, &hdr);
+  free(buf);
+  return rc;
+}
+
+/* LOOKUP: nome -> STORE com o metadado, ou erro. Quem chama segura metadata_lock. */
+static int superpeer_handle_lookup(superpeer_t *sp, const uint8_t *payload, size_t payload_len,
+                                   uint8_t *out, size_t out_cap, size_t *out_len, error_t *err) {
+  char name[METADATA_FILENAME_MAX];
+  const file_metadata_t *found;
+  ssize_t n;
+
+  if (!sp || !payload || !out || !out_len || !err) {
+    if (err)
+      fill_join_error(err, 1, "null argument");
+    return 0;
+  }
+  if (!lookup_unpack(name, sizeof name, payload, payload_len)) {
+    fill_join_error(err, 1, "malformed LOOKUP payload");
+    return 0;
+  }
+  found = metadata_table_find_name(&sp->metadata, name);
+  if (!found) {
+    fill_join_error(err, 1, "not found");
+    return 0;
+  }
+  n = metadata_pack(found, out, out_cap);
+  if (n < 0) {
+    fill_join_error(err, 1, "malformed STORE payload");
+    return 0;
+  }
+  *out_len = (size_t)n;
+  return 1;
+}
+
+/* DOWNLOAD_REP entrante: grava o bloco LZ4 e responde ACK. */
+static int superpeer_handle_chunk_put(superpeer_t *sp, const pl_header *hdr, const uint8_t *payload,
+                                      size_t payload_len, ack_t *ack, error_t *err) {
+  uint8_t object_id[METADATA_OBJECT_ID_SIZE];
+  uint32_t index = 0;
+  uint32_t original_len = 0;
+  uint32_t comp_len = 0;
+  const uint8_t *comp = NULL;
+  const file_metadata_t *meta;
+
+  if (!sp || !hdr || !payload || !ack || !err) {
+    if (err)
+      fill_join_error(err, 1, "null argument");
+    return 0;
+  }
+  memset(ack, 0, sizeof *ack);
+  if (!download_rep_unpack(object_id, &index, &original_len, &comp, &comp_len, payload, payload_len)) {
+    fill_join_error(err, 1, "malformed DOWNLOAD_REP payload");
+    return 0;
+  }
+  meta = metadata_table_find_id(&sp->metadata, object_id);
+  if (!meta || index >= meta->chunk_count || original_len != chunk_plain_len(meta, index)) {
+    fill_join_error(err, 1, "not found");
+    return 0;
+  }
+  if (!storage_put_chunk(SUPERPEER_STORAGE_ROOT, object_id, index, comp, comp_len)) {
+    fill_join_error(err, 1, "storage write failed");
+    return 0;
+  }
+  memcpy(ack->node_id, hdr->src_node, NODE_ID_SIZE);
+  return 1;
+}
+
+/* DOWNLOAD_REQ: devolve o bloco gravado, ainda comprimido. */
+static int superpeer_handle_chunk_get(superpeer_t *sp, const uint8_t *payload, size_t payload_len,
+                                      uint8_t *out, size_t out_cap, size_t *out_len, error_t *err) {
+  uint8_t object_id[METADATA_OBJECT_ID_SIZE];
+  uint32_t index = 0;
+  uint32_t plain;
+  const file_metadata_t *meta;
+  long stored;
+  uint8_t *comp = NULL;
+  size_t comp_len = 0;
+  ssize_t n;
+  int ok = 0;
+
+  if (!sp || !payload || !out || !out_len || !err) {
+    if (err)
+      fill_join_error(err, 1, "null argument");
+    return 0;
+  }
+  if (!download_req_unpack(object_id, &index, payload, payload_len)) {
+    fill_join_error(err, 1, "malformed DOWNLOAD_REQ payload");
+    return 0;
+  }
+  meta = metadata_table_find_id(&sp->metadata, object_id);
+  plain = meta ? chunk_plain_len(meta, index) : 0;
+  if (!meta || index >= meta->chunk_count || plain == 0) {
+    fill_join_error(err, 1, "not found");
+    return 0;
+  }
+  stored = storage_chunk_size(SUPERPEER_STORAGE_ROOT, object_id, index);
+  if (stored <= 0) {
+    fill_join_error(err, 1, "chunk missing");
+    return 0;
+  }
+  comp = malloc((size_t)stored);
+  if (!comp) {
+    fill_join_error(err, 1, "out of memory");
+    return 0;
+  }
+  if (!storage_get_chunk(SUPERPEER_STORAGE_ROOT, object_id, index, comp, (size_t)stored, &comp_len) ||
+      comp_len != (size_t)stored || comp_len > UINT32_MAX) {
+    fill_join_error(err, 1, "chunk missing");
+    goto done;
+  }
+  n = download_rep_pack(object_id, index, plain, comp, (uint32_t)comp_len, out, out_cap);
+  if (n < 0) {
+    fill_join_error(err, 1, "malformed DOWNLOAD_REP payload");
+    goto done;
+  }
+  *out_len = (size_t)n;
+  ok = 1;
+done:
+  free(comp);
+  return ok;
+}
 
 typedef union {
   join_t join;
@@ -372,13 +524,18 @@ typedef union {
 } control_payload_t;
 
 static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer_addr) {
-  uint8_t in_buf[MAX_CONTROL_PAYLOAD_SZ];
+  uint8_t *in_buf = malloc(MAX_DATA_PAYLOAD_SZ);
   control_payload_t payload;
   msg_t msg;
 
+  if (!in_buf) {
+    net_close(conn);
+    return;
+  }
   memset(&payload, 0, sizeof payload);
-  msg = recv_message(conn, in_buf, sizeof in_buf, &payload, sizeof payload);
+  msg = recv_message(conn, in_buf, MAX_DATA_PAYLOAD_SZ, &payload, sizeof payload);
   if (msg.status != NET_OK) {
+    free(in_buf);
     net_close(conn);
     return;
   }
@@ -440,10 +597,64 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       send_error(conn, &msg.header, &sp->self_id, err.code,
                  err.reason[0] ? (const char *)err.reason : "STORE rejected");
     }
+  } else if (msg.header.msg_type == LOOKUP) {
+    uint8_t reply[METADATA_PAYLOAD_MAX];
+    size_t reply_len = 0;
+    error_t err;
+    int ok;
+
+    memset(&err, 0, sizeof err);
+    pthread_mutex_lock(&sp->metadata_lock);
+    ok = superpeer_handle_lookup(sp, in_buf, msg.header.pl_size, reply, sizeof reply,
+                                 &reply_len, &err);
+    pthread_mutex_unlock(&sp->metadata_lock);
+    if (ok) {
+      send_raw(conn, &msg.header, &sp->self_id, STORE, reply, (uint32_t)reply_len);
+    } else {
+      send_error(conn, &msg.header, &sp->self_id, err.code ? err.code : 1,
+                 err.reason[0] ? (const char *)err.reason : "LOOKUP rejected");
+    }
+  } else if (msg.header.msg_type == DOWNLOAD_REP) {
+    ack_t ack;
+    error_t err;
+    int ok;
+
+    memset(&ack, 0, sizeof ack);
+    memset(&err, 0, sizeof err);
+    pthread_mutex_lock(&sp->metadata_lock);
+    ok = superpeer_handle_chunk_put(sp, &msg.header, in_buf, msg.header.pl_size, &ack, &err);
+    pthread_mutex_unlock(&sp->metadata_lock);
+    if (ok) {
+      send_ack(conn, &msg.header, &sp->self_id, &ack);
+    } else {
+      send_error(conn, &msg.header, &sp->self_id, err.code ? err.code : 1,
+                 err.reason[0] ? (const char *)err.reason : "DOWNLOAD_REP rejected");
+    }
+  } else if (msg.header.msg_type == DOWNLOAD_REQ) {
+    uint8_t *reply = malloc(MAX_DATA_PAYLOAD_SZ);
+    size_t reply_len = 0;
+    error_t err;
+    int ok = 0;
+
+    memset(&err, 0, sizeof err);
+    if (reply) {
+      pthread_mutex_lock(&sp->metadata_lock);
+      ok = superpeer_handle_chunk_get(sp, in_buf, msg.header.pl_size, reply, MAX_DATA_PAYLOAD_SZ,
+                                     &reply_len, &err);
+      pthread_mutex_unlock(&sp->metadata_lock);
+    }
+    if (ok) {
+      send_raw(conn, &msg.header, &sp->self_id, DOWNLOAD_REP, reply, (uint32_t)reply_len);
+    } else {
+      send_error(conn, &msg.header, &sp->self_id, err.code ? err.code : 1,
+                 err.reason[0] ? (const char *)err.reason : "DOWNLOAD_REQ rejected");
+    }
+    free(reply);
   } else {
     send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
   }
 
+  free(in_buf);
   net_close(conn);
 }
 

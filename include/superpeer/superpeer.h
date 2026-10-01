@@ -162,7 +162,9 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
  * @param sp Super Peer já inicializado (`listend_fd` válido).
  * @return 0 se @p sp ou o listen fd for inválido. Não retorna no caminho feliz.
  * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK;
- *       STORE → ACK/ERROR. Versão inválida ou @c NET_CLOSED: fecha o fd sem responder.
+ *       STORE → ACK/ERROR; LOOKUP → STORE/ERROR; DOWNLOAD_REP → ACK/ERROR;
+ *       DOWNLOAD_REQ → DOWNLOAD_REP/ERROR. Chunks ficam em `data/storage`.
+ *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder.
  *       Outros tipos: ERROR 3.
  *       Sem limite de conexões simultâneas nem timeout de I/O (MVP). Se
  *       `pthread_create` falhar, a conexão é tratada na thread de accept.

@@ -20,6 +20,30 @@
 #define HEADER_SIZE 99
 /** Teto de bytes de payload aceito para mensagens de controle. */
 #define MAX_CONTROL_PAYLOAD_SZ 4096
+/**
+ * @brief Tamanho máximo do chunk original no CP2, em bytes (4 MiB).
+ *
+ * Igual a @c CHUNK_SIZE de @c file_pipeline.h. Os dois precisam coincidir:
+ * o teto de dados abaixo cabe exatamente um chunk desse tamanho comprimido.
+ */
+#define CHUNK_PLAIN_MAX (4u * 1024u * 1024u)
+/**
+ * @brief Prefixo fixo de @c DOWNLOAD_REP, em bytes.
+ *
+ * object_id (32) + chunk_index (4) + original_len (4) + comp_len (4) = 44.
+ * Os bytes LZ4 vêm em seguida.
+ */
+#define CHUNK_WIRE_PREFIX 44u
+/**
+ * @brief Teto de payload das mensagens de dados (STORE, LOOKUP, DOWNLOAD_*).
+ *
+ * Cabe um chunk de @c CHUNK_PLAIN_MAX após LZ4 (bound = n + n/255 + 16) mais
+ * o prefixo de @c DOWNLOAD_REP. Mensagens de controle continuam em
+ * @c MAX_CONTROL_PAYLOAD_SZ.
+ */
+#define MAX_DATA_PAYLOAD_SZ (CHUNK_WIRE_PREFIX + CHUNK_PLAIN_MAX + (CHUNK_PLAIN_MAX / 255u) + 16u)
+/** Payload fixo de @c DOWNLOAD_REQ: object_id (32) + chunk_index (4). */
+#define DOWNLOAD_REQ_WIRE_SIZE 36u
 /** Versão do framing no primeiro byte do header (`!BH` no fio). */
 #define PROTOCOL_VER 1
 
@@ -149,7 +173,8 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
  *
  * Lê o header em @p in_buf, confere o CRC32 do payload e só então faz o unpack
  * do tipo (@c JOIN, @c LEAVE, @c ACK, @c ERROR). PING/PONG não têm payload.
- * @c STORE e @c LOOKUP passam com o payload cru: o handler desserializa.
+ * @c STORE, @c LOOKUP, @c DOWNLOAD_REQ e @c DOWNLOAD_REP passam com o payload
+ * cru: o handler desserializa. O teto desses tipos é @c MAX_DATA_PAYLOAD_SZ.
  * @param in_buf Mensagem completa: @c HEADER_SIZE bytes de header e em seguida o payload.
  * @param buf_len Bytes válidos em @p in_buf. Precisa cobrir @c HEADER_SIZE + @c pl_size.
  * @param out_hdr Recebe o header; o caller aloca.
@@ -174,12 +199,15 @@ int send_message(int fd, uint8_t *out_msg_buffer, size_t buf_size, const void *m
                  pl_header *msg_header);
 
 /**
- * @brief Recebe header+payload de controle, valida e desserializa.
+ * @brief Recebe uma mensagem, valida o CRC32 e desserializa o controle.
  *
- * Lê o header, confere @c PROTOCOL_VER, o tipo e @c pl_size, lê o payload,
- * valida o CRC32 e faz o unpack para @p struct_payload.
+ * Lê o header, confere @c PROTOCOL_VER, o tipo e @c pl_size, lê o payload
+ * inteiro e valida o CRC32. Controle (@c JOIN, @c LEAVE, @c ACK, @c ERROR)
+ * vai para @p struct_payload. @c STORE, @c LOOKUP, @c DOWNLOAD_REQ e
+ * @c DOWNLOAD_REP ficam crus em @p in_msg_buffer, até @c MAX_DATA_PAYLOAD_SZ.
  * @param fd Socket conectado.
- * @param in_msg_buffer Buffer de trabalho para o payload cru.
+ * @param in_msg_buffer Buffer de trabalho para o payload cru. Para
+ *        @c DOWNLOAD_REP precisa caber @c MAX_DATA_PAYLOAD_SZ.
  * @param in_buf_size Capacidade de @p in_msg_buffer, em bytes. @c pl_size maior é rejeitado.
  * @param struct_payload Destino do struct desserializado; o caller aloca. Ignorado em PING/PONG.
  * @param struct_size Capacidade de @p struct_payload, em bytes. Precisa caber o struct do tipo recebido.
@@ -189,7 +217,10 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size, void *str
                    size_t struct_size);
 
 /**
- * @brief Envia um header seguido de um payload de bytes arbitrário.
+ * @brief Envia um header seguido de um payload de bytes já empacotados.
+ *
+ * Controle fica no teto @c MAX_CONTROL_PAYLOAD_SZ. @c STORE, @c LOOKUP,
+ * @c DOWNLOAD_REQ e @c DOWNLOAD_REP podem ir até @c MAX_DATA_PAYLOAD_SZ.
  * @param fd Socket conectado.
  * @param out_msg_buffer Buffer de trabalho; ao menos @c HEADER_SIZE + @p str_size bytes.
  * @param payload Bytes do payload.
@@ -365,5 +396,84 @@ ssize_t metadata_pack(const file_metadata_t *meta, uint8_t *out, size_t out_cap)
  * @return 1 em sucesso, 0 se o buffer, o nome ou a cauda forem inválidos.
  */
 int metadata_unpack(file_metadata_t *out, const uint8_t *in, size_t in_len);
+
+/**
+ * @brief Serializa um LOOKUP: nome em campo fixo de @c METADATA_FILENAME_MAX bytes.
+ * @param filename Nome lógico, NUL-terminated.
+ * @param out Destino; o caller aloca ao menos @c METADATA_FILENAME_MAX bytes.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se o nome ou o buffer forem inválidos.
+ */
+ssize_t lookup_pack(const char *filename, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê o nome de um LOOKUP empacotado por @c lookup_pack.
+ * @param filename Destino, com espaço para @c METADATA_FILENAME_MAX bytes.
+ * @param filename_cap Capacidade de @p filename.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in. Tem de ser @c METADATA_FILENAME_MAX.
+ * @return 1 em sucesso, 0 se o buffer ou o nome forem inválidos.
+ */
+int lookup_unpack(char *filename, size_t filename_cap, const uint8_t *in, size_t in_len);
+
+/**
+ * @brief Serializa um DOWNLOAD_REQ (object_id + índice, big-endian).
+ * @param object_id ObjectID de 32 bytes.
+ * @param chunk_index Índice do chunk.
+ * @param out Destino; o caller aloca ao menos @c DOWNLOAD_REQ_WIRE_SIZE bytes.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se argumento ou buffer forem inválidos.
+ */
+ssize_t download_req_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
+                          uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê um DOWNLOAD_REQ empacotado por @c download_req_pack.
+ * @param object_id Recebe o ObjectID; o caller aloca 32 bytes.
+ * @param chunk_index Recebe o índice.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in. Tem de ser @c DOWNLOAD_REQ_WIRE_SIZE.
+ * @return 1 em sucesso, 0 se o buffer for inválido ou o ObjectID for zero.
+ */
+int download_req_unpack(uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t *chunk_index,
+                        const uint8_t *in, size_t in_len);
+
+/**
+ * @brief Tamanho no fio de um DOWNLOAD_REP com @p comp_len bytes LZ4.
+ * @param comp_len Tamanho do bloco comprimido.
+ * @return @c CHUNK_WIRE_PREFIX + @p comp_len, ou 0 se passar de @c MAX_DATA_PAYLOAD_SZ
+ *         ou se @p comp_len for 0.
+ */
+size_t download_rep_wire_size(uint32_t comp_len);
+
+/**
+ * @brief Serializa um DOWNLOAD_REP: prefixo big-endian e em seguida os bytes LZ4.
+ * @param object_id ObjectID de 32 bytes.
+ * @param chunk_index Índice do chunk.
+ * @param original_len Tamanho do chunk antes do LZ4. No máximo @c CHUNK_PLAIN_MAX.
+ * @param comp Bytes comprimidos.
+ * @param comp_len Tamanho de @p comp.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se o registro ou o buffer forem inválidos.
+ */
+ssize_t download_rep_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
+                          uint32_t original_len, const uint8_t *comp, uint32_t comp_len,
+                          uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê um DOWNLOAD_REP. @p comp aponta para dentro de @p in (não aloca).
+ * @param object_id Recebe o ObjectID.
+ * @param chunk_index Recebe o índice.
+ * @param original_len Recebe o tamanho original.
+ * @param comp Recebe o ponteiro para os bytes LZ4 dentro de @p in.
+ * @param comp_len Recebe o tamanho do bloco comprimido.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in. Tem de bater com @c comp_len.
+ * @return 1 em sucesso, 0 se o buffer, o ObjectID ou os tamanhos forem inválidos.
+ */
+int download_rep_unpack(uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t *chunk_index,
+                        uint32_t *original_len, const uint8_t **comp, uint32_t *comp_len,
+                        const uint8_t *in, size_t in_len);
 
 #endif

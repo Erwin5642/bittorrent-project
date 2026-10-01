@@ -34,4 +34,20 @@ int upload_prepare(const char *path, const char *storage_root,
  */
 void upload_print_report(const file_metadata_t *meta);
 
+/**
+ * @brief Envia os chunks já comprimidos ao Super Peer, um DOWNLOAD_REP por chunk.
+ *
+ * Lê os blocos gravados por @c upload_prepare e os entrega em paralelo. Cada
+ * worker abre a própria conexão. O STORE do metadado fica a cargo do chamador
+ * e precisa ter sido aceito antes: o Super Peer recusa chunk sem registro.
+ * @param host IPv4 do Super Peer.
+ * @param port Porta TCP do Super Peer.
+ * @param self NodeID de quem envia (vira @c src_node).
+ * @param meta Metadado já aceito no STORE.
+ * @param storage_root Diretório de onde ler os chunks comprimidos.
+ * @return 1 se todos os chunks foram confirmados com ACK, 0 em falha de rede ou I/O.
+ */
+int upload_send_chunks(const char *host, uint16_t port, const node_id_t *self,
+                       const file_metadata_t *meta, const char *storage_root);
+
 #endif
