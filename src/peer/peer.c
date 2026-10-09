@@ -231,6 +231,99 @@ static int cmd_download(const char *name, const char *output, const char *conf,
 	return 0;
 }
 
+static int hex_nibble(char c) {
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/* 64 caracteres hexadecimais, sem 0x. */
+static int parse_object_id(const char *hex, uint8_t out[NODE_ID_SIZE]) {
+	size_t i;
+
+	if (!hex || !out || strlen(hex) != NODE_ID_SIZE * 2)
+		return 0;
+	for (i = 0; i < NODE_ID_SIZE; i++) {
+		int hi = hex_nibble(hex[i * 2]);
+		int lo = hex_nibble(hex[i * 2 + 1]);
+		if (hi < 0 || lo < 0)
+			return 0;
+		out[i] = (uint8_t)((hi << 4) | lo);
+	}
+	return 1;
+}
+
+static void print_lookup_node(const chord_peer_t *node) {
+	char ip[INET_ADDRSTRLEN];
+
+	if (!inet_ntop(AF_INET, &node->ipv4, ip, sizeof ip)) {
+		printf("?\n");
+		return;
+	}
+	printf("%s:%u\n", ip, (unsigned)node->port);
+}
+
+/* Subcomando: --cmd lookup --object-id <64 hex> --host <ip> --port <porta> */
+static int cmd_lookup(const char *object_id, const char *host, long port) {
+	uint8_t key[NODE_ID_SIZE];
+	uint8_t frame[HEADER_SIZE + NODE_ID_SIZE];
+	uint8_t reply[2u + CHORD_LOOKUP_PATH_MAX * CHORD_NODE_WIRE_SIZE];
+	chord_peer_t path[CHORD_LOOKUP_PATH_MAX];
+	pl_header hdr;
+	msg_t msg;
+	unsigned count = 0;
+	unsigned i;
+	int fd;
+	node_id_t self;
+
+	if (!object_id || !parse_object_id(object_id, key)) {
+		fprintf(stderr, "lookup: --object-id precisa de 64 digitos hexadecimais\n");
+		return 1;
+	}
+	if (!host || port < 1 || port > 65535) {
+		fprintf(stderr, "lookup: faltou --host <ip> --port <porta>\n");
+		return 1;
+	}
+
+	memset(&self, 0, sizeof self);
+	fd = net_connect(host, (uint16_t)port);
+	if (fd < 0)
+		return 1;
+
+	memset(&hdr, 0, sizeof hdr);
+	hdr.protocol_ver = PROTOCOL_VER;
+	hdr.msg_type = FIND_SUCCESSOR;
+	hdr.time = (uint64_t)time(NULL);
+	hdr.pl_size = NODE_ID_SIZE;
+	memcpy(hdr.src_node, self.bytes, NODE_ID_SIZE);
+	if (simple_send(fd, frame, key, NODE_ID_SIZE, &hdr) != NET_OK) {
+		net_close(fd);
+		return 1;
+	}
+	msg = simple_recv(fd, reply, sizeof reply);
+	net_close(fd);
+	if (msg.status != NET_OK || msg.header.msg_type != FIND_SUCCESSOR ||
+	    !chord_lookup_path_unpack(path, CHORD_LOOKUP_PATH_MAX, &count, reply, msg.header.pl_size) ||
+	    count == 0) {
+		fprintf(stderr, "lookup: Super Peer nao devolveu o caminho\n");
+		return 1;
+	}
+
+	printf("Lookup path:\n\n");
+	for (i = 0; i < count; i++) {
+		if (i > 0)
+			printf("↓\n");
+		print_lookup_node(&path[i]);
+	}
+	printf("\nOwner: ");
+	print_lookup_node(&path[count - 1]);
+	return 0;
+}
+
 int main(int argc, char* argv[]){
 	const char *cmd  = NULL;
 
@@ -242,21 +335,23 @@ int main(int argc, char* argv[]){
     const char *name = NULL;
     const char *output = NULL;
     const char *conf = NULL;
+    const char *object_id = NULL;
     long port = 0;
 
     static struct option long_opts[] = {
-        {"cmd",    required_argument, NULL, 'c'},
-        {"host",   required_argument, NULL, 'h'},
-        {"port",   required_argument, NULL, 'p'},
-        {"file",   required_argument, NULL, 'f'},
-        {"name",   required_argument, NULL, 'n'},
-        {"output", required_argument, NULL, 'o'},
-        {"config", required_argument, NULL, 'g'},
-        {NULL,     0,                 NULL,  0 }
+        {"cmd",       required_argument, NULL, 'c'},
+        {"host",      required_argument, NULL, 'h'},
+        {"port",      required_argument, NULL, 'p'},
+        {"file",      required_argument, NULL, 'f'},
+        {"name",      required_argument, NULL, 'n'},
+        {"output",    required_argument, NULL, 'o'},
+        {"config",    required_argument, NULL, 'g'},
+        {"object-id", required_argument, NULL, 'i'},
+        {NULL,        0,                 NULL,  0 }
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:i:", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'c': cmd = optarg; break;
         case 'h': host = optarg; break;
@@ -264,6 +359,7 @@ int main(int argc, char* argv[]){
         case 'n': name = optarg; break;
         case 'o': output = optarg; break;
         case 'g': conf = optarg; break;
+        case 'i': object_id = optarg; break;
         case 'p': {
             char *end;
             port = strtol(optarg, &end, 10);
@@ -274,13 +370,13 @@ int main(int argc, char* argv[]){
             break;
         }
         default:
-            fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave> ...\n", argv[0]);
+            fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave|lookup> ...\n", argv[0]);
             return 1;
         }
     }
 
     if (!cmd) {
-        fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave> ...\n", argv[0]);
+        fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave|lookup> ...\n", argv[0]);
         return 1;
     }
 
@@ -289,6 +385,8 @@ int main(int argc, char* argv[]){
         return cmd_upload(file, conf, host, port);
     if (strcmp(cmd, "download") == 0)
         return cmd_download(name, output, conf, host, port);
+    if (strcmp(cmd, "lookup") == 0)
+        return cmd_lookup(object_id, host, port);
 
     /* Comandos de controle do CP1 (ping/join/leave) exigem host/porta. */
     if (port == 0) {

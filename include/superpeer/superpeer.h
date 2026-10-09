@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 /**
  * @file superpeer.h
@@ -47,7 +48,7 @@ typedef struct {
   uint16_t port;             /**< Porta TCP, host byte order. */
   node_type_t node_type;     /**< PEER ou SUPERPEER. */
   member_state_t state;      /**< Estado local. */
-  time_t last_heartbeat;     /**< Instante (epoch, `time(NULL)`) do último heartbeat recebido; stampado no self-insert, no JOIN e a cada RX de HEARTBEAT. */
+  time_t last_heartbeat;     /**< Instante (`time(NULL)`) do último heartbeat. Stampado no self-insert, no JOIN, na inserção pelo anel e a cada RX de HEARTBEAT. */
   uint32_t version;          /**< Versão da entrada. */
 } member_t;
 
@@ -88,6 +89,15 @@ void member_table_init(member_table_t *table);
  * @note JOIN repetido do mesmo IP+porta substitui a entrada, não duplica.
  */
 int member_table_update(member_table_t *table, const member_t *member);
+
+/**
+ * @brief Insere um membro se o IP+porta ainda não existe.
+ * @param table Tabela de destino.
+ * @param member Entrada a copiar numa inserção nova.
+ * @return 1 se inseriu ou se o endereço já existia, 0 se argumento nulo ou tabela cheia.
+ * @note Entrada existente não é reescrita. Um `FAILED` permanece `FAILED`.
+ */
+int member_table_insert_new(member_table_t *table, const member_t *member);
 
 /**
  * @brief Busca um membro pelo NodeID.
@@ -171,11 +181,19 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
  * @return 0 se @p sp ou o listen fd for inválido. Não retorna no caminho feliz.
  * @note PING → PONG (log `RX PING`); JOIN → ACK/ERROR; LEAVE → ACK;
  *       STORE → ACK/ERROR; LOOKUP → STORE/ERROR; DOWNLOAD_REP → ACK/ERROR;
- *       DOWNLOAD_REQ → DOWNLOAD_REP/ERROR. Chunks ficam em `data/storage`.
+ *       DOWNLOAD_REQ → DOWNLOAD_REP/ERROR; CLOSEST_PRECEDING, GET_PREDECESSOR
+ *       e GET_SUCCESSORS → o mesmo tipo, lido do anel; NOTIFY → ACK.
+ *       FIND_SUCCESSOR → o caminho até o dono do ObjectID, no mesmo tipo.
+ *       Chunks ficam em `data/storage`.
  *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder.
  *       Outros tipos: ERROR 3.
  *       Sem limite de conexões simultâneas nem timeout de I/O (MVP). Se
  *       `pthread_create` falhar, a conexão é tratada na thread de accept.
+ *       Antes do laço, uma thread de manutenção faz `join`, `stabilize`,
+ *       `notify`, `fix_fingers` e `check_predecessor` sem atrasar o `accept`.
+ *       Sem bootstrap ela não abre socket. `fix_fingers` avança um índice por
+ *       segundo. RPC do anel que falha tira o nó com `chord_drop_node`.
+ *       Outra thread envia HEARTBEAT e marca SUSPECT quem ficou em silêncio.
  */
 int superpeer_run(superpeer_t *sp);
 

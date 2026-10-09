@@ -8,7 +8,7 @@
 
 /**
  * @file protocol.h
- * @brief Framing TCP, header padrão, payloads de controle e o registro de metadata no fio.
+ * @brief Framing TCP, header padrão, payloads de controle, metadata e nós do Chord no fio.
  *
  * Toda mensagem no fio é @c HEADER_SIZE bytes de header (big-endian) seguidos de
  * @c pl_size bytes de payload. O header carrega um CRC32 do payload. A serialização
@@ -75,6 +75,11 @@ enum message_type{
 	STATE_TRANSFER,  /**< Transferência de estado incremental (CP5, payload variável). */
 	ACK,             /**< Confirmação (payload @c ack_t). */
 	ERROR,           /**< Erro (payload @c error_t). */
+	CLOSEST_PRECEDING, /**< Próximo salto do Chord para um identificador. */
+	GET_PREDECESSOR, /**< Pede o predecessor no anel. */
+	GET_SUCCESSORS,  /**< Pede a lista de sucessores. */
+	NOTIFY,          /**< Avisa o sucessor de um nó recém-chegado (payload @c chord_peer_t). */
+	FIND_SUCCESSOR,  /**< Caminho de lookup até o dono de um ObjectID. */
 	MSG_TYPE_MAX,    /**< Sentinela: número de tipos válidos. */
 };
 
@@ -288,6 +293,118 @@ int send_join(int fd, const node_id_t *self, const join_t *join);
  * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
  */
 int send_leave(int fd, const node_id_t *self, const leave_t *leave);
+
+/** Nó do Chord no fio: NodeID (32) + IPv4 (4) + porta (2), big-endian. */
+#define CHORD_NODE_WIRE_SIZE 38u
+/** Pedido de @c CLOSEST_PRECEDING: só o identificador procurado. */
+#define CHORD_CLOSEST_REQ_SIZE NODE_ID_SIZE
+/** Resposta de @c CLOSEST_PRECEDING: um byte de status e um nó. */
+#define CHORD_CLOSEST_REP_SIZE (1u + CHORD_NODE_WIRE_SIZE)
+/** A busca ainda tem um salto. */
+#define CHORD_STEP_NEXT 0
+/** O nó devolvido é o sucessor do identificador. */
+#define CHORD_STEP_DONE 1
+/** Máximo de sucessores em @c GET_SUCCESSORS. Igual a @c CHORD_R. */
+#define CHORD_SUCCESSORS_MAX 3u
+/**
+ * @brief Máximo de saltos numa resposta de @c FIND_SUCCESSOR.
+ *
+ * Cabe em @c MAX_CONTROL_PAYLOAD_SZ junto com a contagem de 2 bytes.
+ */
+#define CHORD_LOOKUP_PATH_MAX 64u
+
+/**
+ * @brief Nó do Chord como payload, sem o status nem a contagem.
+ */
+typedef struct {
+  uint8_t id[NODE_ID_SIZE]; /**< NodeID, 32 bytes crus. */
+  uint32_t ipv4;            /**< IPv4, network byte order. */
+  uint16_t port;            /**< Porta TCP, host byte order. No fio vai em big-endian. */
+} chord_peer_t;
+
+/**
+ * @brief Escreve um @c chord_peer_t em @c CHORD_NODE_WIRE_SIZE bytes.
+ * @param in Nó de origem.
+ * @param out Destino; o caller aloca ao menos @c CHORD_NODE_WIRE_SIZE bytes.
+ * @return 0 em sucesso, -1 se algum ponteiro for nulo.
+ * @note O IPv4 já entra em network byte order e é copiado como está. A porta
+ *       sai em big-endian.
+ */
+int chord_peer_pack(const chord_peer_t *in, uint8_t *out);
+
+/**
+ * @brief Lê um nó escrito por @c chord_peer_pack.
+ * @param out Destino; o caller aloca.
+ * @param in Bytes do fio.
+ * @return 0 em sucesso, -1 se algum ponteiro for nulo.
+ */
+int chord_peer_unpack(chord_peer_t *out, const uint8_t *in);
+
+/**
+ * @brief Empacota a resposta de @c CLOSEST_PRECEDING.
+ * @param done @c CHORD_STEP_DONE ou @c CHORD_STEP_NEXT.
+ * @param node Nó devolvido. Na busca concluída, é o sucessor da chave.
+ * @param out Destino; o caller aloca ao menos @c CHORD_CLOSEST_REP_SIZE bytes.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se o status ou o buffer forem inválidos.
+ */
+ssize_t chord_closest_reply_pack(uint8_t done, const chord_peer_t *node, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê a resposta empacotada por @c chord_closest_reply_pack.
+ * @param done Recebe @c CHORD_STEP_DONE ou @c CHORD_STEP_NEXT.
+ * @param node Recebe o nó.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in. Tem de ser @c CHORD_CLOSEST_REP_SIZE.
+ * @return 1 em sucesso, 0 se o buffer ou o status forem inválidos.
+ */
+int chord_closest_reply_unpack(uint8_t *done, chord_peer_t *node, const uint8_t *in, size_t in_len);
+
+/**
+ * @brief Empacota a resposta de @c GET_SUCCESSORS: contagem e os nós.
+ * @param nodes Lista. Pode ser nula se @p count for 0.
+ * @param count Quantidade, no máximo @c CHORD_SUCCESSORS_MAX.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se a lista ou o buffer forem inválidos.
+ */
+ssize_t chord_successors_pack(const chord_peer_t *nodes, unsigned count, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê a lista empacotada por @c chord_successors_pack.
+ * @param nodes Destino da lista; o caller aloca @p cap entradas.
+ * @param cap Capacidade de @p nodes.
+ * @param count Recebe a quantidade lida.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in.
+ * @return 1 em sucesso, 0 se o buffer ou a contagem forem inválidos.
+ */
+int chord_successors_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
+                            size_t in_len);
+
+/**
+ * @brief Empacota o caminho de @c FIND_SUCCESSOR.
+ *
+ * A contagem sai em 2 bytes big-endian, seguida dos nós. O último é o dono da chave.
+ * @param nodes Nós do caminho, o primeiro é quem recebeu o pedido. Nulo se @p count for 0.
+ * @param count Quantidade, no máximo @c CHORD_LOOKUP_PATH_MAX.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se a lista ou o buffer forem inválidos.
+ */
+ssize_t chord_lookup_path_pack(const chord_peer_t *nodes, unsigned count, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê o caminho empacotado por @c chord_lookup_path_pack.
+ * @param nodes Destino; o caller aloca @p cap entradas.
+ * @param cap Capacidade de @p nodes.
+ * @param count Recebe a quantidade lida.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in.
+ * @return 1 em sucesso, 0 se o buffer ou a contagem forem inválidos.
+ */
+int chord_lookup_path_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
+                             size_t in_len);
 
 /**
  * @brief Envia um HEARTBEAT (mensagem de origem, não reply), sem payload.
