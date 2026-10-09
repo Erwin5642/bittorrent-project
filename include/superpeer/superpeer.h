@@ -34,8 +34,8 @@
  */
 typedef enum {
   MEMBER_ALIVE,   /**< Nó ativo; recebeu heartbeat há menos de @c HEARTBEAT_TIMEOUT_SEC. */
-  MEMBER_SUSPECT, /**< Silencioso por mais de @c HEARTBEAT_TIMEOUT_SEC (CP3); confirmação via Gossip é CP4. */
-  MEMBER_FAILED,  /**< Reservado (Gossip/Election, CP4). */
+  MEMBER_SUSPECT, /**< Silencioso por mais de @c HEARTBEAT_TIMEOUT_SEC. O próximo heartbeat que não conecta promove a @c MEMBER_FAILED. */
+  MEMBER_FAILED,  /**< SUSPECT cujo heartbeat não conectou. Deixa de receber batimento. */
   MEMBER_REMOVED  /**< Saiu via LEAVE; não é mais alvo de heartbeat. */
 } member_state_t;
 
@@ -193,7 +193,8 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
  *       `notify`, `fix_fingers` e `check_predecessor` sem atrasar o `accept`.
  *       Sem bootstrap ela não abre socket. `fix_fingers` avança um índice por
  *       segundo. RPC do anel que falha tira o nó com `chord_drop_node`.
- *       Outra thread envia HEARTBEAT e marca SUSPECT quem ficou em silêncio.
+ *       Outra thread envia HEARTBEAT, marca SUSPECT quem ficou em silêncio
+ *       e FAILED o SUSPECT cujo heartbeat não conecta.
  */
 int superpeer_run(superpeer_t *sp);
 

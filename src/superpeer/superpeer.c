@@ -844,7 +844,8 @@ static void *connection_worker(void *arg) {
  *   1. Julga: compara 'now - last_heartbeat' de cada membro contra
  *      HEARTBEAT_TIMEOUT_SEC (15s) e rebaixa quem ficou em silencio para
  *      MEMBER_SUSPECT. O retorno a MEMBER_ALIVE acontece no RX de HEARTBEAT,
- *      em handle_connection. A promocao SUSPECT->FAILED fica para o Gossip (CP4).
+ *      em handle_connection. SUSPECT cujo connect falha vira MEMBER_FAILED
+ *      e sai da lista de envio.
  *   2. Envia: a cada HEARTBEAT_SEC (5s) emite um batimento para os demais
  *      Super Peers ainda considerados vivos (node_type == SUPERPEER e
  *      state != MEMBER_FAILED).
@@ -855,6 +856,30 @@ static void *connection_worker(void *arg) {
  * o envio em si (net_connect/send_heartbeat, bloqueante) roda depois do
  * unlock, para nao travar JOIN/LEAVE/STORE/etc. enquanto conecta.
  */
+
+/* Connect recusado para quem ja esta SUSPECT: uma falha basta para parar de discar. */
+static void fail_suspect(superpeer_t *sp, const member_t *target) {
+	char ip[INET_ADDRSTRLEN];
+	char hex[NODE_ID_HEX_SIZE];
+	size_t i;
+
+	pthread_mutex_lock(&sp->members_lock);
+	for (i = 0; i < sp->members.count; i++) {
+		member_t *member = &sp->members.entries[i];
+
+		if (node_id_cmp(&member->id, &target->id) != 0)
+			continue;
+		if (member->state != MEMBER_SUSPECT)
+			break;
+		member->state = MEMBER_FAILED;
+		if (inet_ntop(AF_INET, &member->ipv4, ip, sizeof ip) &&
+		    node_id_to_hex(&member->id, hex, sizeof hex))
+			printf("FAILED %s %s:%d\n", hex, ip, member->port);
+		break;
+	}
+	pthread_mutex_unlock(&sp->members_lock);
+}
+
 static void *heartbeat_worker(void *arg) {
 	superpeer_t* sp = arg;
 	time_t last_hb = 0;
@@ -894,6 +919,8 @@ static void *heartbeat_worker(void *arg) {
 					if(send_heartbeat(fd, &sp->self_id) == NET_OK)
 						printf("TX HEARTBEAT -> %s:%d\n", ip, targets[i].port);
 					net_close(fd);
+				} else if(targets[i].state == MEMBER_SUSPECT){
+					fail_suspect(sp, &targets[i]);
 				}
 			}
 			last_hb = now;
