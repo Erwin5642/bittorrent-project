@@ -487,8 +487,37 @@ static void test_handle_store_null(void) {
 /**
  * @brief Executa a suíte do Super Peer e devolve o código de test_report.
  */
+static void test_member_table_insert_keeps_existing(void) {
+  member_table_t table;
+  member_t failed;
+  member_t again;
+  const member_t *found;
+
+  member_table_init(&table);
+  memset(&failed, 0, sizeof failed);
+  fill_id(&failed.id, 9);
+  failed.ipv4 = ipv4_from_str("10.0.0.9");
+  failed.port = 5109;
+  failed.node_type = SUPERPEER;
+  failed.state = MEMBER_FAILED;
+  expect(member_table_insert_new(&table, &failed) == 1, "insere o primeiro");
+  expect(table.count == 1, "uma entrada");
+
+  again = failed;
+  fill_id(&again.id, 8);
+  again.state = MEMBER_ALIVE;
+  again.last_heartbeat = 42;
+  expect(member_table_insert_new(&table, &again) == 1, "endereco existente nao falha");
+  expect(table.count == 1, "nao duplica");
+  found = member_table_find_addr(&table, failed.ipv4, failed.port);
+  expect(found != NULL && found->state == MEMBER_FAILED, "FAILED permanece");
+  expect(found != NULL && found->id.bytes[0] == failed.id.bytes[0], "NodeID nao e reescrito");
+  expect(member_table_insert_new(NULL, &again) == 0, "insercao sem tabela falha");
+}
+
 int main(void) {
   test_member_table_upsert_and_find();
+  test_member_table_insert_keeps_existing();
   test_member_table_full();
   test_member_table_null();
   test_handle_join_ok();
