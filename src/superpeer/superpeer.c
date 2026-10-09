@@ -722,9 +722,7 @@ static void *heartbeat_worker(void *arg) {
 				node_id_to_hex(&sel_member->id, hex, NODE_ID_HEX_SIZE);
 				printf("SUSPECT %s %s:%d\n", hex, ip, sel_member->port);
 			}
-
-			/* Snapshot do alvo: a conexao real acontece fora do lock. */
-			if(send_now && sel_member->node_type == SUPERPEER && sel_member->state != MEMBER_FAILED){
+			else if(send_now && sel_member->node_type == SUPERPEER && sel_member->state != MEMBER_FAILED && sel_member->state != MEMBER_REMOVED){
 				targets[target_count++] = *sel_member;
 			}
 		}
