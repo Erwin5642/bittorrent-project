@@ -178,6 +178,74 @@ static void test_invalid_fields(void) {
   unlink(TEST_CONF_PATH);
 }
 
+static const char *ROSTER = "# roster\n"
+                             "\n"
+                             "SP1,superpeer,127.0.0.1,5101,00000001,1\n"
+                             "SP2,superpeer,127.0.0.1,5102,00000002,2\n"
+                             "SP3,superpeer,127.0.0.1,5103,00000003,3\n";
+
+/**
+ * @brief A primeira linha do roster cria o anel; as demais entram por ela.
+ */
+static void test_roster_bootstrap(void) {
+  node_config_t cfg;
+  char name[16];
+
+  expect(write_temp_conf(ROSTER), "escreve roster");
+  expect(node_config_load(TEST_CONF_PATH, &cfg) == 0, "chave=valor recusa o CSV");
+
+  expect(node_roster_load(TEST_CONF_PATH, 5101, &cfg, name, sizeof name) == 1, "SP1 carrega");
+  expect(strcmp(name, "SP1") == 0, "nome SP1");
+  expect(cfg.port == 5101, "porta 5101");
+  expect(cfg.ipv4 == ipv4_from_str("127.0.0.1"), "ip do SP1");
+  expect(cfg.node_type == SUPERPEER, "SP1 e superpeer");
+  expect(cfg.bootstrap_count == 0, "SP1 nao tem bootstrap");
+
+  expect(node_roster_load(TEST_CONF_PATH, 5103, &cfg, name, sizeof name) == 1, "SP3 carrega");
+  expect(strcmp(name, "SP3") == 0, "nome SP3");
+  expect(cfg.bootstrap_count == 1, "SP3 tem um bootstrap");
+  expect(cfg.bootstrap[0].port == 5101, "bootstrap e a porta 5101");
+  expect(cfg.bootstrap[0].ipv4 == ipv4_from_str("127.0.0.1"), "bootstrap no loopback");
+  unlink(TEST_CONF_PATH);
+}
+
+/**
+ * @brief Porta ausente, linha curta, porta duplicada e ponteiros nulos falham.
+ */
+static void test_roster_rejects(void) {
+  node_config_t cfg;
+  char name[16];
+  char tiny[2];
+
+  expect(node_roster_load(NULL, 5101, &cfg, name, sizeof name) == 0, "path NULL falha");
+  expect(node_roster_load("/tmp/does-not-exist-bt-roster", 5101, &cfg, name, sizeof name) == 0,
+         "roster ausente falha");
+  expect(write_temp_conf(ROSTER), "reescreve roster");
+  expect(node_roster_load(TEST_CONF_PATH, 0, &cfg, name, sizeof name) == 0, "porta 0 falha");
+  expect(node_roster_load(TEST_CONF_PATH, 5101, NULL, name, sizeof name) == 0, "out NULL falha");
+  expect(node_roster_load(TEST_CONF_PATH, 9999, &cfg, name, sizeof name) == 0, "porta ausente falha");
+  expect(node_roster_load(TEST_CONF_PATH, 5101, &cfg, tiny, sizeof tiny) == 0, "nome nao cabe");
+  unlink(TEST_CONF_PATH);
+
+  expect(write_temp_conf("SP1,superpeer,127.0.0.1,5101,00000001\n"), "linha curta");
+  expect(node_roster_load(TEST_CONF_PATH, 5101, &cfg, name, sizeof name) == 0, "coluna a menos falha");
+  unlink(TEST_CONF_PATH);
+
+  expect(write_temp_conf("SP1,superpeer,127.0.0.1,5101,00000001,1\n"
+                         "SPX,superpeer,127.0.0.1,5101,00000009,9\n"),
+         "porta duplicada");
+  expect(node_roster_load(TEST_CONF_PATH, 5101, &cfg, name, sizeof name) == 0, "porta repetida falha");
+  unlink(TEST_CONF_PATH);
+
+  expect(write_temp_conf("ip=127.0.0.1\nport=55101\ntype=superpeer\nbootstrap=\n"), "conf do C1");
+  expect(node_roster_load(TEST_CONF_PATH, 55101, &cfg, name, sizeof name) == 0,
+         "chave=valor nao e roster");
+  expect(node_config_load(TEST_CONF_PATH, &cfg) == 1, "o mesmo arquivo segue no parser antigo");
+  expect(cfg.port == 55101, "porta do C1 preservada");
+  expect(cfg.bootstrap_count == 0, "bootstrap vazio do C1");
+  unlink(TEST_CONF_PATH);
+}
+
 /**
  * @brief Caminho inexistente e ponteiros nulos falham.
  */
@@ -200,5 +268,7 @@ int main(void) {
   test_missing_required();
   test_invalid_fields();
   test_null_and_missing_file();
+  test_roster_bootstrap();
+  test_roster_rejects();
   return test_report();
 }

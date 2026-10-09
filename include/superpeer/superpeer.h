@@ -4,6 +4,7 @@
 #include "common/config.h"
 #include "common/node.h"
 #include "common/protocol.h"
+#include "superpeer/chord.h"
 #include "superpeer/metadata.h"
 
 #include <pthread.h>
@@ -60,6 +61,7 @@ typedef struct {
   node_id_t self_id;                 /**< NodeID deste Super Peer. */
   member_table_t members;            /**< Membership local. */
   metadata_table_t metadata;         /**< Índice local por ObjectID. */
+  chord_t chord;                     /**< Anel local. Começa com o sucessor igual a este nó. */
   int listend_fd;                    /**< fd de `net_listen`, ou -1. */
   char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
@@ -114,7 +116,7 @@ void member_table_print(const member_table_t *table);
  * @note Inclui o próprio nó como @c MEMBER_ALIVE. O bind usa @p port (ou a do
  *       .conf) em todas as interfaces; o `ip` da config só entra no NodeID.
  *       A tabela de metadata começa vazia. @c metadata_lock é independente de
- *       @c members_lock.
+ *       @c members_lock. O anel começa com um nó só: o sucessor é este processo.
  */
 int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const char *name);
 
