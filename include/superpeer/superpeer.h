@@ -29,14 +29,17 @@
 /** Silêncio a partir do qual um membro ALIVE é rebaixado para SUSPECT, em segundos. */
 #define HEARTBEAT_TIMEOUT_SEC 15
 
+/** Intervalo entre trocas de membership com um vizinho, em segundos. */
+#define GOSSIP_SEC 1
+
 /**
  * @brief Estado de um membro na tabela local.
  */
 typedef enum {
   MEMBER_ALIVE,   /**< Nó ativo; recebeu heartbeat há menos de @c HEARTBEAT_TIMEOUT_SEC. */
-  MEMBER_SUSPECT, /**< Silencioso por mais de @c HEARTBEAT_TIMEOUT_SEC (CP3); confirmação via Gossip é CP4. */
-  MEMBER_FAILED,  /**< Reservado (Gossip/Election, CP4). */
-  MEMBER_REMOVED  /**< Saiu via LEAVE; não é mais alvo de heartbeat. */
+  MEMBER_SUSPECT, /**< Silencioso por mais de @c HEARTBEAT_TIMEOUT_SEC. O Gossip ainda não confirmou. */
+  MEMBER_FAILED,  /**< Gossip confirmou a suspeita: outro Super Peer também o vê caído. */
+  MEMBER_REMOVED  /**< Saiu via LEAVE; não é mais alvo de heartbeat nem de Gossip. */
 } member_state_t;
 
 /**
@@ -98,6 +101,28 @@ int member_table_update(member_table_t *table, const member_t *member);
  * @note Entrada existente não é reescrita. Um `FAILED` permanece `FAILED`.
  */
 int member_table_insert_new(member_table_t *table, const member_t *member);
+
+/**
+ * @brief Mescla um digest de @c GOSSIP na tabela local.
+ *
+ * Observação mais recente (@c last_heartbeat) ganha. Um @c ALIVE mais novo
+ * desfaz @c SUSPECT. Dois Super Peers que já veem o mesmo nó como @c SUSPECT
+ * (ou um deles como @c FAILED) promovem a linha a @c FAILED. O próprio nó não
+ * é rebaixado. @p speaker, se não for nulo, fica @c ALIVE: a conexão prova que
+ * ele responde.
+ * @param table Tabela local; o caller serializa o acesso.
+ * @param self_id NodeID deste processo. Linha igual a ele é ignorada.
+ * @param speaker NodeID de quem enviou o digest. Nulo se não houver.
+ * @param rows Linhas recebidas. Nulo se @p count for 0.
+ * @param count Quantidade de @p rows.
+ * @param failed_ids Destino dos NodeIDs promovidos a @c FAILED nesta chamada. Pode ser nulo.
+ * @param failed_cap Capacidade de @p failed_ids.
+ * @param failed_count Recebe quantos ids foram gravados. Pode ser nulo se @p failed_cap for 0.
+ * @return 1 em sucesso, 0 se @p table ou @p self_id for nulo, ou se @p failed_cap for positivo sem destino.
+ */
+int member_apply_gossip(member_table_t *table, const node_id_t *self_id, const node_id_t *speaker,
+                        const gossip_member_t *rows, unsigned count, node_id_t *failed_ids,
+                        unsigned failed_cap, unsigned *failed_count);
 
 /**
  * @brief Busca um membro pelo NodeID.
@@ -194,6 +219,8 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
  *       Sem bootstrap ela não abre socket. `fix_fingers` avança um índice por
  *       segundo. RPC do anel que falha tira o nó com `chord_drop_node`.
  *       Outra thread envia HEARTBEAT e marca SUSPECT quem ficou em silêncio.
+ *       Uma terceira troca GOSSIP com um vizinho a cada @c GOSSIP_SEC e promove
+ *       a FAILED quem dois Super Peers já suspeitam.
  */
 int superpeer_run(superpeer_t *sp);
 

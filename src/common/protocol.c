@@ -87,6 +87,7 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [GET_SUCCESSORS] = "GET_SUCCESSORS",
     [NOTIFY] = "NOTIFY",
     [FIND_SUCCESSOR] = "FIND_SUCCESSOR",
+    [GOSSIP] = "GOSSIP",
 };
 
 /* STORE/LOOKUP/DOWNLOAD_* carregam bytes crus e podem passar do teto de controle. */
@@ -544,6 +545,110 @@ int chord_lookup_path_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count,
 	return 1;
 }
 
+_Static_assert(GOSSIP_ENTRY_WIRE_SIZE == 52u, "entrada de gossip");
+_Static_assert(2u + GOSSIP_MAX_ENTRIES * GOSSIP_ENTRY_WIRE_SIZE <= MAX_CONTROL_PAYLOAD_SZ,
+               "gossip cabe no teto de controle");
+
+/* Uma linha: id, ipv4 (já em network order), porta, tipo, estado, heartbeat, versão. */
+static int gossip_entry_pack(const gossip_member_t *row, uint8_t *out) {
+	uint8_t *pt = out;
+	uint16_t port_be;
+	uint32_t ver_be;
+	uint64_t hb_be;
+
+	if (!row || !out)
+		return -1;
+	/* 1 = SUPERPEER, 3 = MEMBER_REMOVED. O protocolo não inclui superpeer.h. */
+	if (row->node_type > 1 || row->state > 3)
+		return -1;
+	memcpy(pt, row->id, NODE_ID_SIZE);
+	pt += NODE_ID_SIZE;
+	memcpy(pt, &row->ipv4, 4);
+	pt += 4;
+	port_be = htons(row->port);
+	memcpy(pt, &port_be, 2);
+	pt += 2;
+	*pt++ = row->node_type;
+	*pt++ = row->state;
+	hb_be = my_ntohll(row->last_heartbeat);
+	memcpy(pt, &hb_be, 8);
+	pt += 8;
+	ver_be = htonl(row->version);
+	memcpy(pt, &ver_be, 4);
+	return 0;
+}
+
+static int gossip_entry_unpack(gossip_member_t *row, const uint8_t *in) {
+	const uint8_t *pt = in;
+	uint16_t port_be;
+	uint32_t ver_be;
+	uint64_t hb_be;
+
+	if (!row || !in)
+		return -1;
+	memset(row, 0, sizeof *row);
+	memcpy(row->id, pt, NODE_ID_SIZE);
+	pt += NODE_ID_SIZE;
+	memcpy(&row->ipv4, pt, 4);
+	pt += 4;
+	memcpy(&port_be, pt, 2);
+	row->port = ntohs(port_be);
+	pt += 2;
+	row->node_type = *pt++;
+	row->state = *pt++;
+	if (row->node_type > 1 || row->state > 3)
+		return -1;
+	memcpy(&hb_be, pt, 8);
+	row->last_heartbeat = my_ntohll(hb_be);
+	pt += 8;
+	memcpy(&ver_be, pt, 4);
+	row->version = ntohl(ver_be);
+	return 0;
+}
+
+ssize_t gossip_members_pack(const gossip_member_t *rows, unsigned count, uint8_t *out, size_t out_cap) {
+	unsigned i;
+	size_t need;
+	uint16_t be;
+
+	if (!out || count > GOSSIP_MAX_ENTRIES || (count > 0 && !rows))
+		return -1;
+	need = 2u + (size_t)count * GOSSIP_ENTRY_WIRE_SIZE;
+	if (out_cap < need)
+		return -1;
+	be = htons((uint16_t)count);
+	memcpy(out, &be, 2);
+	for (i = 0; i < count; i++) {
+		if (gossip_entry_pack(&rows[i], out + 2u + (size_t)i * GOSSIP_ENTRY_WIRE_SIZE) != 0)
+			return -1;
+	}
+	return (ssize_t)need;
+}
+
+int gossip_members_unpack(gossip_member_t *rows, unsigned cap, unsigned *count, const uint8_t *in,
+                          size_t in_len) {
+	uint16_t be;
+	unsigned n;
+	unsigned i;
+
+	if (!count || !in || in_len < 2)
+		return 0;
+	memcpy(&be, in, 2);
+	n = ntohs(be);
+	if (n > GOSSIP_MAX_ENTRIES || n > cap)
+		return 0;
+	if (in_len != 2u + (size_t)n * GOSSIP_ENTRY_WIRE_SIZE)
+		return 0;
+	if (n > 0 && !rows)
+		return 0;
+	for (i = 0; i < n; i++) {
+		if (gossip_entry_unpack(&rows[i], in + 2u + (size_t)i * GOSSIP_ENTRY_WIRE_SIZE) != 0)
+			return 0;
+	}
+	*count = n;
+	return 1;
+}
+
 /* DOWNLOAD_REQ: 32 bytes de ObjectID + uint32 big-endian. */
 ssize_t download_req_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
                           uint8_t *out, size_t out_cap) {
@@ -860,6 +965,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case GET_PREDECESSOR:
     case GET_SUCCESSORS:
     case FIND_SUCCESSOR:
+    case GOSSIP:
         break;   /* payload cru; o handler desserializa */
     default:
         return NET_ERROR;
@@ -887,8 +993,8 @@ int send_message(const int fd, uint8_t *out_msg_buffer, const size_t buf_size,
  * desserializa para struct_payload. Devolve msg_t com header, payload e status.
  *
  * STORE/LOOKUP/DOWNLOAD_* sao lidos por inteiro (ate MAX_DATA_PAYLOAD_SZ) e
- * devolvidos crus em in_msg_buffer. GOSSIP, STATE_TRANSFER e SNAPSHOT continuam
- * sem leitura do corpo: o layout deles pertence aos checkpoints seguintes.
+ * devolvidos crus em in_msg_buffer. GOSSIP também. STATE_TRANSFER e SNAPSHOT
+ * continuam sem leitura do corpo: o layout deles pertence aos checkpoints seguintes.
  */
 msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
                    void *struct_payload, size_t struct_size){
@@ -919,8 +1025,8 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 		return (msg_t){{0}, NULL, NET_ERROR};
 	}
 
-	/* Layout ainda indefinido (CP4/CP5): nao consome o corpo. */
-	if (message_type == GOSSIP || message_type == STATE_TRANSFER || message_type == SNAPSHOT)
+	/* Layout ainda indefinido (CP5): nao consome o corpo. */
+	if (message_type == STATE_TRANSFER || message_type == SNAPSHOT)
 		return (msg_t){msg_header, struct_payload, NET_OK};
 
 	if (payload_size > payload_ceiling(message_type) ||

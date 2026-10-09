@@ -59,6 +59,216 @@ int member_table_insert_new(member_table_t *table, const member_t *member) {
   return member_table_update(table, member);
 }
 
+static int id_is_zero(const node_id_t *id) {
+  node_id_t zero;
+
+  memset(&zero, 0, sizeof zero);
+  return node_id_cmp(id, &zero) == 0;
+}
+
+static member_t *member_slot_by_id(member_table_t *table, const node_id_t *id) {
+  size_t i;
+
+  for (i = 0; i < table->count; i++) {
+    if (node_id_cmp(&table->entries[i].id, id) == 0) {
+      return &table->entries[i];
+    }
+  }
+  return NULL;
+}
+
+static void note_failed(node_id_t *ids, unsigned cap, unsigned *n, const node_id_t *id) {
+  unsigned i;
+
+  if (!ids || !n || *n >= cap) {
+    return;
+  }
+  for (i = 0; i < *n; i++) {
+    if (node_id_cmp(&ids[i], id) == 0) {
+      return;
+    }
+  }
+  ids[(*n)++] = *id;
+}
+
+static void member_from_gossip(member_t *dst, const gossip_member_t *src) {
+  memset(dst, 0, sizeof *dst);
+  memcpy(dst->id.bytes, src->id, NODE_ID_SIZE);
+  dst->ipv4 = src->ipv4;
+  dst->port = src->port;
+  dst->node_type = (node_type_t)src->node_type;
+  dst->state = (member_state_t)src->state;
+  dst->last_heartbeat = (time_t)src->last_heartbeat;
+  dst->version = src->version;
+}
+
+/* Insere se o NodeID e o endereço ainda não existem. Não reescreve linha velha. */
+static int insert_gossip_row(member_table_t *table, const gossip_member_t *row) {
+  member_t member;
+  node_id_t id;
+
+  memcpy(id.bytes, row->id, NODE_ID_SIZE);
+  if (member_slot_by_id(table, &id) || member_table_find_addr(table, row->ipv4, row->port)) {
+    return 1;
+  }
+  if (table->count >= MEMBER_TABLE_MAX_SIZE) {
+    return 0;
+  }
+  member_from_gossip(&member, row);
+  table->entries[table->count++] = member;
+  return 1;
+}
+
+int member_apply_gossip(member_table_t *table, const node_id_t *self_id, const node_id_t *speaker,
+                        const gossip_member_t *rows, unsigned count, node_id_t *failed_ids,
+                        unsigned failed_cap, unsigned *failed_count) {
+  unsigned i;
+  unsigned noted = 0;
+
+  if (!table || !self_id || (count > 0 && !rows) || (failed_cap > 0 && (!failed_ids || !failed_count))) {
+    return 0;
+  }
+  if (failed_count) {
+    *failed_count = 0;
+  }
+
+  for (i = 0; i < count; i++) {
+    const gossip_member_t *row = &rows[i];
+    node_id_t id;
+    member_t *local;
+    int speaker_row;
+
+    if (row->node_type > SUPERPEER || row->state > MEMBER_REMOVED || row->port == 0) {
+      continue;
+    }
+    memcpy(id.bytes, row->id, NODE_ID_SIZE);
+    if (id_is_zero(&id) || node_id_cmp(&id, self_id) == 0) {
+      continue;
+    }
+    speaker_row = speaker && node_id_cmp(&id, speaker) == 0;
+    local = member_slot_by_id(table, &id);
+
+    if (speaker_row) {
+      if (!local) {
+        gossip_member_t alive = *row;
+        alive.state = MEMBER_ALIVE;
+        alive.last_heartbeat = (uint64_t)time(NULL);
+        insert_gossip_row(table, &alive);
+      } else {
+        local->ipv4 = row->ipv4;
+        local->port = row->port;
+        local->node_type = (node_type_t)row->node_type;
+        local->state = MEMBER_ALIVE;
+        local->last_heartbeat = time(NULL);
+      }
+      continue;
+    }
+
+    if (!local) {
+      insert_gossip_row(table, row);
+      local = member_slot_by_id(table, &id);
+      if (local && local->node_type == SUPERPEER && local->state == MEMBER_FAILED) {
+        note_failed(failed_ids, failed_cap, &noted, &id);
+      }
+      continue;
+    }
+
+    if (row->state == MEMBER_REMOVED && local->state != MEMBER_REMOVED) {
+      local->state = MEMBER_REMOVED;
+      local->version++;
+      continue;
+    }
+    if (local->state == MEMBER_REMOVED) {
+      continue;
+    }
+
+    if (local->node_type == SUPERPEER && row->node_type == SUPERPEER &&
+        local->state == MEMBER_SUSPECT &&
+        (row->state == MEMBER_SUSPECT || row->state == MEMBER_FAILED)) {
+      local->state = MEMBER_FAILED;
+      local->version++;
+      note_failed(failed_ids, failed_cap, &noted, &id);
+      continue;
+    }
+
+    if (row->last_heartbeat > (uint64_t)local->last_heartbeat) {
+      member_state_t previous = local->state;
+      member_from_gossip(local, row);
+      if (previous != MEMBER_FAILED && local->node_type == SUPERPEER && local->state == MEMBER_FAILED) {
+        note_failed(failed_ids, failed_cap, &noted, &id);
+      }
+      continue;
+    }
+
+    if (row->last_heartbeat == (uint64_t)local->last_heartbeat && row->state > local->state) {
+      member_state_t previous = local->state;
+      local->state = (member_state_t)row->state;
+      local->version = row->version;
+      if (previous != MEMBER_FAILED && local->node_type == SUPERPEER && local->state == MEMBER_FAILED) {
+        note_failed(failed_ids, failed_cap, &noted, &id);
+      }
+    }
+  }
+
+  if (failed_count) {
+    *failed_count = noted;
+  }
+  return 1;
+}
+
+/* Copia a tabela para o fio. A própria linha sai ALIVE, com o relógio de agora. */
+static unsigned gossip_snapshot(const member_table_t *table, const node_id_t *self_id,
+                                gossip_member_t *out, unsigned cap) {
+  size_t i;
+  unsigned n = 0;
+
+  if (!table || !self_id || !out || cap == 0) {
+    return 0;
+  }
+  for (i = 0; i < table->count && n < cap; i++) {
+    const member_t *member = &table->entries[i];
+    gossip_member_t *row = &out[n];
+
+    if (member->port == 0 || id_is_zero(&member->id)) {
+      continue;
+    }
+    memset(row, 0, sizeof *row);
+    memcpy(row->id, member->id.bytes, NODE_ID_SIZE);
+    row->ipv4 = member->ipv4;
+    row->port = member->port;
+    row->node_type = (uint8_t)member->node_type;
+    row->state = (uint8_t)member->state;
+    row->last_heartbeat = (uint64_t)member->last_heartbeat;
+    row->version = member->version;
+    if (node_id_cmp(&member->id, self_id) == 0) {
+      row->state = MEMBER_ALIVE;
+      row->last_heartbeat = (uint64_t)time(NULL);
+    }
+    n++;
+  }
+  return n;
+}
+
+static void gossip_log_failed(const member_table_t *table, const node_id_t *ids, unsigned count) {
+  unsigned i;
+  char ip[INET_ADDRSTRLEN];
+  char hex[NODE_ID_HEX_SIZE];
+
+  for (i = 0; i < count; i++) {
+    const member_t *member = member_table_find_id(table, &ids[i]);
+
+    if (!member || member->state != MEMBER_FAILED) {
+      continue;
+    }
+    if (!inet_ntop(AF_INET, &member->ipv4, ip, sizeof ip)) {
+      continue;
+    }
+    node_id_to_hex(&member->id, hex, sizeof hex);
+    printf("FAILED %s %s:%u\n", hex, ip, (unsigned)member->port);
+    fflush(stdout);
+  }
+}
+
 const member_t *member_table_find_id(const member_table_t *table, const node_id_t *node_id) {
   size_t i;
 
@@ -718,6 +928,40 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
 		}
 	}
 	pthread_mutex_unlock(&sp->members_lock);
+  } else if (msg.header.msg_type == GOSSIP) {
+    gossip_member_t remote[GOSSIP_MAX_ENTRIES];
+    gossip_member_t local_rows[GOSSIP_MAX_ENTRIES];
+    node_id_t failed[GOSSIP_MAX_ENTRIES];
+    node_id_t speaker;
+    unsigned remote_count = 0;
+    unsigned failed_count = 0;
+    unsigned n_drop;
+    uint8_t reply[2u + GOSSIP_MAX_ENTRIES * GOSSIP_ENTRY_WIRE_SIZE];
+    ssize_t packed;
+    unsigned local_count;
+
+    memcpy(speaker.bytes, msg.header.src_node, NODE_ID_SIZE);
+    if (!gossip_members_unpack(remote, GOSSIP_MAX_ENTRIES, &remote_count, in_buf, msg.header.pl_size)) {
+      send_error(conn, &msg.header, &sp->self_id, 1, "malformed GOSSIP payload");
+    } else {
+      pthread_mutex_lock(&sp->members_lock);
+      if (!member_apply_gossip(&sp->members, &sp->self_id, &speaker, remote, remote_count, failed,
+                               GOSSIP_MAX_ENTRIES, &failed_count)) {
+        failed_count = 0;
+      }
+      gossip_log_failed(&sp->members, failed, failed_count);
+      local_count = gossip_snapshot(&sp->members, &sp->self_id, local_rows, GOSSIP_MAX_ENTRIES);
+      pthread_mutex_unlock(&sp->members_lock);
+      for (n_drop = 0; n_drop < failed_count; n_drop++) {
+        chord_drop_node(&sp->chord, &failed[n_drop]);
+      }
+      packed = gossip_members_pack(local_rows, local_count, reply, sizeof reply);
+      if (packed < 0) {
+        send_error(conn, &msg.header, &sp->self_id, 1, "GOSSIP reply failed");
+      } else {
+        send_raw(conn, &msg.header, &sp->self_id, GOSSIP, reply, (uint32_t)packed);
+      }
+    }
   } else if (msg.header.msg_type == CLOSEST_PRECEDING) {
     node_id_t key;
     chord_node_t step;
@@ -844,7 +1088,8 @@ static void *connection_worker(void *arg) {
  *   1. Julga: compara 'now - last_heartbeat' de cada membro contra
  *      HEARTBEAT_TIMEOUT_SEC (15s) e rebaixa quem ficou em silencio para
  *      MEMBER_SUSPECT. O retorno a MEMBER_ALIVE acontece no RX de HEARTBEAT,
- *      em handle_connection. A promocao SUSPECT->FAILED fica para o Gossip (CP4).
+ *      em handle_connection. A promocao SUSPECT->FAILED sai do Gossip, quando
+ *      outro Super Peer concorda.
  *   2. Envia: a cada HEARTBEAT_SEC (5s) emite um batimento para os demais
  *      Super Peers ainda considerados vivos (node_type == SUPERPEER e
  *      state != MEMBER_FAILED).
@@ -876,6 +1121,7 @@ static void *heartbeat_worker(void *arg) {
 
 			if(age >= HEARTBEAT_TIMEOUT_SEC && sel_member->state == MEMBER_ALIVE){
 				sel_member->state = MEMBER_SUSPECT;
+				sel_member->version++;
 				inet_ntop(AF_INET, &sel_member->ipv4, ip, INET_ADDRSTRLEN);
 				node_id_to_hex(&sel_member->id, hex, NODE_ID_HEX_SIZE);
 				printf("SUSPECT %s %s:%d\n", hex, ip, sel_member->port);
@@ -1479,9 +1725,114 @@ static void *chord_maintenance(void *arg) {
   return NULL;
 }
 
+/* Um vizinho por vez, em rodízio. A cópia da tabela sai com o lock solto antes do socket. */
+static int gossip_pick_neighbor(superpeer_t *sp, unsigned *cursor, member_t *out,
+                                gossip_member_t *rows, unsigned *row_count) {
+  size_t i;
+  unsigned eligible = 0;
+  unsigned target;
+  unsigned seen = 0;
+  int found = 0;
+
+  pthread_mutex_lock(&sp->members_lock);
+  for (i = 0; i < sp->members.count; i++) {
+    const member_t *member = &sp->members.entries[i];
+
+    if (member->node_type == SUPERPEER && member->state != MEMBER_FAILED &&
+        member->state != MEMBER_REMOVED && member->port != 0 &&
+        node_id_cmp(&member->id, &sp->self_id) != 0) {
+      eligible++;
+    }
+  }
+  if (eligible > 0) {
+    target = *cursor % eligible;
+    (*cursor)++;
+    for (i = 0; i < sp->members.count; i++) {
+      const member_t *member = &sp->members.entries[i];
+
+      if (member->node_type != SUPERPEER || member->state == MEMBER_FAILED ||
+          member->state == MEMBER_REMOVED || member->port == 0 ||
+          node_id_cmp(&member->id, &sp->self_id) == 0) {
+        continue;
+      }
+      if (seen == target) {
+        *out = *member;
+        found = 1;
+        break;
+      }
+      seen++;
+    }
+  }
+  *row_count = gossip_snapshot(&sp->members, &sp->self_id, rows, GOSSIP_MAX_ENTRIES);
+  pthread_mutex_unlock(&sp->members_lock);
+  return found;
+}
+
+static void gossip_exchange(superpeer_t *sp, const member_t *neighbor, const gossip_member_t *rows,
+                            unsigned row_count) {
+  uint8_t payload[2u + GOSSIP_MAX_ENTRIES * GOSSIP_ENTRY_WIRE_SIZE];
+  uint8_t reply[2u + GOSSIP_MAX_ENTRIES * GOSSIP_ENTRY_WIRE_SIZE];
+  gossip_member_t remote[GOSSIP_MAX_ENTRIES];
+  node_id_t failed[GOSSIP_MAX_ENTRIES];
+  chord_node_t dest;
+  node_id_t speaker;
+  msg_t msg;
+  ssize_t packed;
+  unsigned remote_count = 0;
+  unsigned failed_count = 0;
+  unsigned i;
+  char ip[INET_ADDRSTRLEN];
+
+  packed = gossip_members_pack(rows, row_count, payload, sizeof payload);
+  if (packed < 0 || !inet_ntop(AF_INET, &neighbor->ipv4, ip, sizeof ip)) {
+    return;
+  }
+  memset(&dest, 0, sizeof dest);
+  memcpy(dest.id.bytes, neighbor->id.bytes, NODE_ID_SIZE);
+  dest.ipv4 = neighbor->ipv4;
+  dest.port = neighbor->port;
+  dest.valid = 1;
+  if (!rpc_raw(&dest, &sp->self_id, GOSSIP, payload, (uint32_t)packed, reply, sizeof reply, &msg) ||
+      msg.header.msg_type != GOSSIP ||
+      !gossip_members_unpack(remote, GOSSIP_MAX_ENTRIES, &remote_count, reply, msg.header.pl_size)) {
+    return;
+  }
+  memcpy(speaker.bytes, msg.header.src_node, NODE_ID_SIZE);
+  pthread_mutex_lock(&sp->members_lock);
+  if (!member_apply_gossip(&sp->members, &sp->self_id, &speaker, remote, remote_count, failed,
+                           GOSSIP_MAX_ENTRIES, &failed_count)) {
+    failed_count = 0;
+  }
+  gossip_log_failed(&sp->members, failed, failed_count);
+  pthread_mutex_unlock(&sp->members_lock);
+  for (i = 0; i < failed_count; i++) {
+    chord_drop_node(&sp->chord, &failed[i]);
+  }
+  printf("TX GOSSIP -> %s:%u\n", ip, (unsigned)neighbor->port);
+  fflush(stdout);
+}
+
+static void *gossip_worker(void *arg) {
+  superpeer_t *sp = arg;
+  unsigned cursor = 0;
+
+  while (1) {
+    member_t neighbor;
+    gossip_member_t rows[GOSSIP_MAX_ENTRIES];
+    unsigned row_count = 0;
+
+    if (gossip_pick_neighbor(sp, &cursor, &neighbor, rows, &row_count)) {
+      gossip_exchange(sp, &neighbor, rows, row_count);
+    }
+    sleep_ms(GOSSIP_SEC * 1000u);
+  }
+  return NULL;
+}
+
 int superpeer_run(superpeer_t *sp) {
   pthread_t maintenance;
   pthread_t hb;
+  pthread_t gossip;
 
   if (!sp || sp->listend_fd < 0) {
     return 0;
@@ -1491,6 +1842,9 @@ int superpeer_run(superpeer_t *sp) {
    * não impede o accept. */
   if (pthread_create(&hb, NULL, heartbeat_worker, sp) == 0) {
     pthread_detach(hb);
+  }
+  if (pthread_create(&gossip, NULL, gossip_worker, sp) == 0) {
+    pthread_detach(gossip);
   }
   if (pthread_create(&maintenance, NULL, chord_maintenance, sp) == 0) {
     pthread_detach(maintenance);

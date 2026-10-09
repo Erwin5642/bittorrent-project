@@ -67,7 +67,7 @@ enum message_type{
 	COMMIT,          /**< Confirmação do 2PC (CP5). */
 	ABORT,           /**< Aborto do 2PC (CP5). */
 	HEARTBEAT,       /**< Batimento de detecção de falhas (CP4). */
-	GOSSIP,          /**< Disseminação Gossip (CP4, payload variável). */
+	GOSSIP,          /**< Disseminação da membership (payload variável). */
 	ELECTION,        /**< Mensagem de eleição Bully (CP4). */
 	OK,              /**< Resposta positiva na eleição Bully (CP4). */
 	COORDINATOR,     /**< Anúncio de coordenador eleito (CP4). */
@@ -405,6 +405,57 @@ ssize_t chord_lookup_path_pack(const chord_peer_t *nodes, unsigned count, uint8_
  */
 int chord_lookup_path_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
                              size_t in_len);
+
+/**
+ * @brief Uma linha da membership no fio de @c GOSSIP.
+ *
+ * @c ipv4 fica em network byte order. @c port é host byte order na struct
+ * e big-endian no fio. @c last_heartbeat é epoch em segundos, big-endian no fio.
+ * @c node_type segue @c node_type_t e @c state segue @c member_state_t.
+ */
+typedef struct {
+  uint8_t id[NODE_ID_SIZE]; /**< NodeID. */
+  uint32_t ipv4;            /**< IPv4 anunciado, network byte order. */
+  uint16_t port;            /**< Porta TCP, host byte order. */
+  uint8_t node_type;        /**< @c PEER ou @c SUPERPEER. */
+  uint8_t state;            /**< @c MEMBER_ALIVE até @c MEMBER_REMOVED. */
+  uint64_t last_heartbeat;  /**< Epoch do último batimento observado. */
+  uint32_t version;         /**< Quantas vezes a linha mudou de estado. */
+} gossip_member_t;
+
+/** Bytes de uma @c gossip_member_t no fio. */
+#define GOSSIP_ENTRY_WIRE_SIZE 52u
+
+/**
+ * @brief Máximo de linhas num @c GOSSIP.
+ *
+ * 2 bytes de contagem mais 64 entradas cabem em @c MAX_CONTROL_PAYLOAD_SZ.
+ */
+#define GOSSIP_MAX_ENTRIES 64u
+
+/**
+ * @brief Empacota a membership de @c GOSSIP.
+ *
+ * A contagem sai em 2 bytes big-endian, seguida das linhas.
+ * @param rows Linhas. Nulo se @p count for 0.
+ * @param count Quantidade, no máximo @c GOSSIP_MAX_ENTRIES.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se a lista ou o buffer forem inválidos.
+ */
+ssize_t gossip_members_pack(const gossip_member_t *rows, unsigned count, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê a membership empacotada por @c gossip_members_pack.
+ * @param rows Destino; o caller aloca @p cap linhas.
+ * @param cap Capacidade de @p rows.
+ * @param count Recebe a quantidade lida.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in.
+ * @return 1 em sucesso, 0 se o buffer, a contagem ou um estado forem inválidos.
+ */
+int gossip_members_unpack(gossip_member_t *rows, unsigned cap, unsigned *count, const uint8_t *in,
+                          size_t in_len);
 
 /**
  * @brief Envia um HEARTBEAT (mensagem de origem, não reply), sem payload.
