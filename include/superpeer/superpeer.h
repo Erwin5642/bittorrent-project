@@ -21,14 +21,20 @@
 /** Tamanho do nome lógico do nó (CLI `--name`), incluindo o NUL. */
 #define SUPERPEER_NAME_MAX 64
 
+/** Intervalo entre batimentos enviados pela thread de heartbeat (CP3), em segundos. */
+#define HEARTBEAT_SEC 5
+
+/** Silêncio a partir do qual um membro ALIVE é rebaixado para SUSPECT, em segundos. */
+#define HEARTBEAT_TIMEOUT_SEC 15
+
 /**
  * @brief Estado de um membro na tabela local.
  */
 typedef enum {
-  MEMBER_ALIVE,   /**< Nó ativo. Único estado usado no CP1. */
-  MEMBER_SUSPECT, /**< Reservado (Gossip). */
-  MEMBER_FAILED,  /**< Reservado (Gossip). */
-  MEMBER_REMOVED  /**< Reservado (saída). */
+  MEMBER_ALIVE,   /**< Nó ativo; recebeu heartbeat há menos de @c HEARTBEAT_TIMEOUT_SEC. */
+  MEMBER_SUSPECT, /**< Silencioso por mais de @c HEARTBEAT_TIMEOUT_SEC (CP3); confirmação via Gossip é CP4. */
+  MEMBER_FAILED,  /**< Reservado (Gossip/Election, CP4). */
+  MEMBER_REMOVED  /**< Saiu via LEAVE; não é mais alvo de heartbeat. */
 } member_state_t;
 
 /**
@@ -40,7 +46,7 @@ typedef struct {
   uint16_t port;             /**< Porta TCP, host byte order. */
   node_type_t node_type;     /**< PEER ou SUPERPEER. */
   member_state_t state;      /**< Estado local. */
-  uint16_t last_heartbeat;   /**< Último heartbeat (CP1: 0). */
+  time_t last_heartbeat;     /**< Instante (epoch, `time(NULL)`) do último heartbeat recebido; stampado no self-insert, no JOIN e a cada RX de HEARTBEAT. */
   uint32_t version;          /**< Versão da entrada. */
 } member_t;
 

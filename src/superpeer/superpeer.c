@@ -5,6 +5,7 @@
 #include "common/config.h"
 #include "common/network.h"
 #include "common/node.h"
+#include "common/protocol.h"
 #include "peer/storage.h"
 
 #include <stddef.h>
@@ -149,7 +150,7 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   self.port = cfg.port;
   self.node_type = SUPERPEER;
   self.state = MEMBER_ALIVE;
-  self.last_heartbeat = 0;
+  self.last_heartbeat = (time_t)time(NULL);
   self.version = 0;
   if (!member_table_update(&sp->members, &self)) {
     fprintf(stderr, "superpeer_init: failed to self insert superpeer\n");
@@ -225,7 +226,7 @@ int superpeer_handle_join(superpeer_t *sp, const pl_header *hdr, const join_t *j
   member.port = join->port;
   member.node_type = join->node_type == SUPERPEER ? SUPERPEER : PEER;
   member.state = MEMBER_ALIVE;
-  member.last_heartbeat = 0;
+  member.last_heartbeat = (time_t)time(NULL);
   if (existing) {
     member.version = existing->version + 1;
   } else {
@@ -650,6 +651,19 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
                  err.reason[0] ? (const char *)err.reason : "DOWNLOAD_REQ rejected");
     }
     free(reply);
+  } else if (msg.header.msg_type == HEARTBEAT){
+	/* RX de heartbeat (CP3): so atualiza o emissor, nao responde (fire-and-forget). */
+	node_id_t sender;
+	memcpy(&sender, msg.header.src_node, NODE_ID_SIZE);
+	pthread_mutex_lock(&sp->members_lock);
+	for(size_t i = 0; i<sp->members.count; i++){
+		if(node_id_cmp(&sp->members.entries[i].id, &sender) == 0){
+			sp->members.entries[i].last_heartbeat = (time_t)time(NULL);
+			sp->members.entries[i].state = MEMBER_ALIVE; /* revive de SUSPECT se o silencio tinha sido so uma falsa suspeita */
+			break;
+		}
+	}
+	pthread_mutex_unlock(&sp->members_lock);
   } else {
     send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
   }
@@ -666,10 +680,87 @@ static void *connection_worker(void *arg) {
   return NULL;
 }
 
+/*
+ * Thread de heartbeat (CP3): roda para sempre, detached, junto do accept loop.
+ * Cada despertar (1s) faz duas coisas sobre a membership table:
+ *   1. Julga: compara 'now - last_heartbeat' de cada membro contra
+ *      HEARTBEAT_TIMEOUT_SEC (15s) e rebaixa quem ficou em silencio para
+ *      MEMBER_SUSPECT. O retorno a MEMBER_ALIVE acontece no RX de HEARTBEAT,
+ *      em handle_connection. A promocao SUSPECT->FAILED fica para o Gossip (CP4).
+ *   2. Envia: a cada HEARTBEAT_SEC (5s) emite um batimento para os demais
+ *      Super Peers ainda considerados vivos (node_type == SUPERPEER e
+ *      state != MEMBER_FAILED).
+ * O julgamento acontece a cada 1s (mais fino que o envio, 5s) para garantir
+ * que a transicao para SUSPECT seja detectada bem antes do timeout do
+ * harness do professor (FAILURE_TIMEOUT_SEC + 3s).
+ * Os alvos do envio sao copiados para 'targets' ainda dentro de members_lock;
+ * o envio em si (net_connect/send_heartbeat, bloqueante) roda depois do
+ * unlock, para nao travar JOIN/LEAVE/STORE/etc. enquanto conecta.
+ */
+static void *heartbeat_worker(void *arg) {
+	superpeer_t* sp = arg;
+	time_t last_hb = 0;
+	unsigned sleep_interval_ms = 1000;
+
+	char ip[INET_ADDRSTRLEN];
+	char hex[NODE_ID_HEX_SIZE];
+	while(1){
+		time_t now = (time_t)time(NULL);
+		int send_now = (now - last_hb >= HEARTBEAT_SEC);
+		member_t targets[MEMBER_TABLE_MAX_SIZE];
+		size_t target_count = 0;
+		pthread_mutex_lock(&sp->members_lock);
+		for(size_t i = 0; i < sp->members.count; i++){
+			member_t* sel_member = &sp->members.entries[i];
+
+			if(node_id_cmp(&sel_member->id, &sp->self_id) == 0) continue; /* nunca se autossuspeita */
+			time_t age = now - sel_member->last_heartbeat;
+
+			if(age >= HEARTBEAT_TIMEOUT_SEC && sel_member->state == MEMBER_ALIVE){
+				sel_member->state = MEMBER_SUSPECT;
+				inet_ntop(AF_INET, &sel_member->ipv4, ip, INET_ADDRSTRLEN);
+				node_id_to_hex(&sel_member->id, hex, NODE_ID_HEX_SIZE);
+				printf("SUSPECT %s %s:%d\n", hex, ip, sel_member->port);
+			}
+
+			/* Snapshot do alvo: a conexao real acontece fora do lock. */
+			if(send_now && sel_member->node_type == SUPERPEER && sel_member->state != MEMBER_FAILED){
+				targets[target_count++] = *sel_member;
+			}
+		}
+		pthread_mutex_unlock(&sp->members_lock);
+
+		if(send_now){
+			for(size_t i = 0; i < target_count; i++){
+				inet_ntop(AF_INET, &targets[i].ipv4, ip, INET_ADDRSTRLEN);
+				int fd = net_connect(ip, targets[i].port);
+				if(fd >= 0){
+					if(send_heartbeat(fd, &sp->self_id) == NET_OK)
+						printf("TX HEARTBEAT -> %s:%d\n", ip, targets[i].port);
+					net_close(fd);
+				}
+			}
+			last_hb = now;
+		}
+
+		sleep_ms(sleep_interval_ms);
+	}
+
+	return NULL;
+}
+
 int superpeer_run(superpeer_t *sp) {
   if (!sp || sp->listend_fd < 0) {
     return 0;
   }
+	/* Thread de heartbeat (CP3): detached, igual as threads de conexao;
+	 * nao ha shutdown gracioso (o harness usa kill -9), entao nao ha o que
+	 * join-ar. Falha ao criar so deixa o Super Peer sem deteccao de falhas,
+	 * mas nao impede o accept loop abaixo. */
+	pthread_t hb;
+	if(pthread_create(&hb, 0, heartbeat_worker, sp) == 0){
+		pthread_detach(hb);
+	}
 
   while (1) {
     pthread_t th;
