@@ -290,6 +290,14 @@ int send_join(int fd, const node_id_t *self, const join_t *join);
 int send_leave(int fd, const node_id_t *self, const leave_t *leave);
 
 /**
+ * @brief Envia um HEARTBEAT (mensagem de origem, não reply), sem payload.
+ * @param fd Socket conectado ao destino.
+ * @param self NodeID de quem emite o batimento (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_heartbeat(int fd, const node_id_t *self);
+
+/**
  * @brief Tamanho fixo do payload de um tipo de controle.
  * @param t Valor de @c message_type.
  * @return Bytes do payload (0 para PING/PONG), ou @c -1 se @p t estiver fora de faixa.

@@ -48,7 +48,7 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[PREPARE] = -1,
 	[COMMIT] = -1,
 	[ABORT] = -1,
-	[HEARTBEAT] = -1,
+	[HEARTBEAT] = 0,
 	[GOSSIP] = -1,
 	[ELECTION] = -1,
 	[OK] = -1,
@@ -635,6 +635,7 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
     case ERROR: pack_rc = pack_error((const error_t *)payload, payload_area); break;
     case PING:
     case PONG:
+    case HEARTBEAT:
         break;                      /* sem payload */
     default:
         return -1;
@@ -708,6 +709,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case ERROR: unpack_rc = unpack_error(out_payload, payload_area); break;
     case PING:
     case PONG:
+    case HEARTBEAT:
         break;
     case STORE:
     case LOOKUP:
@@ -958,6 +960,20 @@ int send_leave(int fd, const node_id_t *self, const leave_t *leave) {
 		return NET_ERROR;
 	}
 	return send_message(fd, buf, sizeof buf, &body, &hdr);
+}
+
+/* Atalho: envia HEARTBEAT como mensagem de origem (TransactionID novo), sem payload. */
+int send_heartbeat(int fd, const node_id_t *self) {
+	uint8_t buf[HEADER_SIZE];
+	pl_header hdr;
+
+	if (!self) {
+		return NET_ERROR;
+	}
+	if (!fill_origin_header(&hdr, self, HEARTBEAT, 0)) {
+		return NET_ERROR;
+	}
+	return send_message(fd, buf, sizeof buf, NULL, &hdr);
 }
 
 /* Atalho: envia JOIN como mensagem de origem (TransactionID novo). */
