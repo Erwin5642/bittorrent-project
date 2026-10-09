@@ -515,9 +515,81 @@ static void test_member_table_insert_keeps_existing(void) {
   expect(member_table_insert_new(NULL, &again) == 0, "insercao sem tabela falha");
 }
 
+static gossip_member_t gossip_row(uint8_t seed, uint16_t port, uint8_t state, uint64_t heard) {
+  gossip_member_t row;
+  node_id_t id;
+
+  memset(&row, 0, sizeof row);
+  fill_id(&id, seed);
+  memcpy(row.id, id.bytes, NODE_ID_SIZE);
+  row.ipv4 = ipv4_from_str("10.0.0.8");
+  row.port = port;
+  row.node_type = SUPERPEER;
+  row.state = state;
+  row.last_heartbeat = heard;
+  row.version = 1;
+  return row;
+}
+
+static void test_gossip_merge(void) {
+  member_table_t table;
+  member_t local;
+  node_id_t self;
+  node_id_t failed[4];
+  unsigned failed_count = 99;
+  gossip_member_t row;
+  const member_t *found;
+
+  member_table_init(&table);
+  fill_id(&self, 1);
+  expect(member_apply_gossip(NULL, &self, NULL, NULL, 0, NULL, 0, NULL) == 0, "merge sem tabela falha");
+
+  memset(&local, 0, sizeof local);
+  fill_id(&local.id, 8);
+  local.ipv4 = ipv4_from_str("10.0.0.8");
+  local.port = 5108;
+  local.node_type = SUPERPEER;
+  local.state = MEMBER_SUSPECT;
+  local.last_heartbeat = 100;
+  expect(member_table_update(&table, &local) == 1, "linha suspeita");
+
+  row = gossip_row(8, 5108, MEMBER_ALIVE, 130);
+  expect(member_apply_gossip(&table, &self, NULL, &row, 1, failed, 4, &failed_count) == 1,
+         "refutacao aplicada");
+  found = member_table_find_id(&table, &local.id);
+  expect(found && found->state == MEMBER_ALIVE && failed_count == 0, "ALIVE mais novo desfaz SUSPECT");
+
+  local.state = MEMBER_SUSPECT;
+  local.last_heartbeat = 100;
+  member_table_update(&table, &local);
+  row = gossip_row(8, 5108, MEMBER_SUSPECT, 90);
+  failed_count = 99;
+  expect(member_apply_gossip(&table, &self, NULL, &row, 1, failed, 4, &failed_count) == 1,
+         "confirmacao aplicada");
+  found = member_table_find_id(&table, &local.id);
+  expect(found && found->state == MEMBER_FAILED && failed_count == 1, "dois SUSPECT viram FAILED");
+  expect(node_id_cmp(&failed[0], &local.id) == 0, "o id confirmado e o do suspeito");
+
+  row = gossip_row(1, 5101, MEMBER_FAILED, 500);
+  memcpy(row.id, self.bytes, NODE_ID_SIZE);
+  failed_count = 99;
+  expect(member_apply_gossip(&table, &self, NULL, &row, 1, failed, 4, &failed_count) == 1,
+         "linha propria e ignorada");
+  expect(failed_count == 0 && member_table_find_id(&table, &self) == NULL, "o self nao entra na tabela");
+
+  row = gossip_row(8, 5108, MEMBER_FAILED, 1);
+  memcpy(row.id, local.id.bytes, NODE_ID_SIZE);
+  failed_count = 99;
+  expect(member_apply_gossip(&table, &self, &local.id, &row, 1, failed, 4, &failed_count) == 1,
+         "quem fala esta vivo");
+  found = member_table_find_id(&table, &local.id);
+  expect(found && found->state == MEMBER_ALIVE && failed_count == 0, "o speaker nao e promovido a FAILED");
+}
+
 int main(void) {
   test_member_table_upsert_and_find();
   test_member_table_insert_keeps_existing();
+  test_gossip_merge();
   test_member_table_full();
   test_member_table_null();
   test_handle_join_ok();
