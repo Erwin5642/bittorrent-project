@@ -220,6 +220,30 @@ static void test_id_cmp(void) {
 }
 
 /**
+ * @brief NodeID do Super Peer é SHA256(IP || porta), estável e distinto por porta.
+ */
+static void test_endpoint_id(void) {
+  node_id_t got;
+  node_id_t again;
+  node_id_t other;
+  node_id_t want_c1;
+  node_id_t want_c3;
+
+  expect(parse_hex32("9b14e2b508aa47cc5f2696abc83149340abdca65a6e22c731e4e433e2ea1604f", &want_c1),
+         "parse vetor 55101");
+  expect(parse_hex32("4da6276c5bd925b472d696005d6a5229b863c17dd9ecac233733c487d52fe748", &want_c3),
+         "parse vetor 5101");
+  expect(node_id_from_endpoint(ipv4_from_str("127.0.0.1"), 55101, &got) == 1, "endpoint 55101");
+  expect(memcmp(got.bytes, want_c1.bytes, NODE_ID_SIZE) == 0, "C1/C2 em 127.0.0.1:55101");
+  expect(node_id_from_endpoint(ipv4_from_str("127.0.0.1"), 55101, &again) == 1, "endpoint de novo");
+  expect(memcmp(got.bytes, again.bytes, NODE_ID_SIZE) == 0, "segunda chamada repete o digest");
+  expect(node_id_from_endpoint(ipv4_from_str("127.0.0.1"), 5101, &other) == 1, "endpoint 5101");
+  expect(memcmp(other.bytes, want_c3.bytes, NODE_ID_SIZE) == 0, "porta 5101 tem o digest do C3");
+  expect(memcmp(got.bytes, other.bytes, NODE_ID_SIZE) != 0, "55101 e 5101 diferem");
+  expect(node_id_from_endpoint(ipv4_from_str("127.0.0.1"), 55101, NULL) == 0, "out NULL falha");
+}
+
+/**
  * @brief Confere hex minúsculo de 64 chars, buffer curto e argumentos nulos.
  */
 static void test_id_to_hex(void) {
@@ -254,6 +278,7 @@ int main(void) {
   test_random_ids_differ();
   test_id_cmp();
   test_id_to_hex();
+  test_endpoint_id();
 
   return test_report();
 }

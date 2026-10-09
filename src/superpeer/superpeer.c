@@ -97,10 +97,10 @@ void member_table_print(const member_table_t *table) {
 
 int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const char *name) {
   node_config_t cfg;
-  node_uuid_t uuid;
   member_t self;
   char ip[INET_ADDRSTRLEN];
   char hex[NODE_ID_HEX_SIZE];
+  char roster_name[SUPERPEER_NAME_MAX];
   int fd;
 
   if (!sp || !conf_path) {
@@ -109,8 +109,10 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
 
   memset(sp, 0, sizeof *sp);
   sp->listend_fd = -1;
+  roster_name[0] = '\0';
 
-  if (!node_config_load(conf_path, &cfg)) {
+  if (!node_config_load(conf_path, &cfg) &&
+      (port == 0 || !node_roster_load(conf_path, port, &cfg, roster_name, sizeof roster_name))) {
     fprintf(stderr, "superpeer_init: failed to load %s\n", conf_path);
     return 0;
   }
@@ -124,13 +126,15 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   }
   if (name && name[0]) {
     strncpy(sp->name, name, sizeof sp->name - 1);
+  } else if (roster_name[0]) {
+    strncpy(sp->name, roster_name, sizeof sp->name - 1);
   } else {
     strncpy(sp->name, "superpeer", sizeof sp->name - 1);
   }
 
   sp->cfg = cfg;
 
-  if (!node_uuid_random(&uuid) || !node_id_generate(cfg.ipv4, cfg.port, &uuid, &sp->self_id)) {
+  if (!node_id_from_endpoint(cfg.ipv4, cfg.port, &sp->self_id)) {
     fprintf(stderr, "superpeer_init: failed to generate NodeID\n");
     return 0;
   }
@@ -166,8 +170,22 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
+  if (!chord_init(&sp->chord)) {
+    fprintf(stderr, "superpeer_init: failed to init chord\n");
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
+  if (!chord_create(&sp->chord, &sp->self_id, cfg.ipv4, cfg.port)) {
+    fprintf(stderr, "superpeer_init: failed to create chord ring\n");
+    chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
   fd = net_listen(cfg.port);
   if (fd < 0) {
+    chord_shutdown(&sp->chord);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;

@@ -69,6 +69,17 @@ int node_uuid_random(node_uuid_t *uuid);
 int node_id_generate(const uint32_t ipv4, const uint16_t port, const node_uuid_t *uuid, node_id_t *out);
 
 /**
+ * @brief Gera um NodeID estável, SHA256(IP || Porta), sem UUID.
+ * @param ipv4 IPv4 anunciado, network byte order.
+ * @param port Porta TCP de escuta, host byte order (convertida no hash).
+ * @param out NodeID resultante; o caller aloca.
+ * @return 1 em sucesso, 0 se @p out for nulo ou o hash falhar.
+ * @note O mesmo endpoint produz o mesmo identificador em toda execução. O peer
+ *       continua usando @c node_id_generate, que inclui UUID.
+ */
+int node_id_from_endpoint(uint32_t ipv4, uint16_t port, node_id_t *out);
+
+/**
  * @brief Compara dois NodeIDs em ordem lexicográfica byte a byte.
  * @param a Primeiro NodeID.
  * @param b Segundo NodeID.

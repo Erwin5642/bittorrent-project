@@ -78,6 +78,20 @@ int node_id_generate(const uint32_t ipv4, const uint16_t port, const node_uuid_t
   return sha256(buffer, sizeof(buffer), out->bytes);
 }
 
+int node_id_from_endpoint(uint32_t ipv4, uint16_t port, node_id_t *out) {
+  uint8_t buffer[4 + 2];
+  uint16_t port_be;
+
+  if (!out) {
+    return 0;
+  }
+
+  port_be = htons(port);
+  memcpy(buffer, &ipv4, 4);
+  memcpy(buffer + 4, &port_be, 2);
+  return sha256(buffer, sizeof buffer, out->bytes);
+}
+
 int node_id_cmp(const node_id_t *a, const node_id_t *b) {
   if (!a || !b) {
     if (a == b) {

@@ -202,3 +202,146 @@ int node_config_load(const char *path, node_config_t *out) {
   fclose(fp);
   return seen_ip && seen_port && seen_type;
 }
+
+static int parse_priority(const char *s) {
+  char *end;
+  unsigned long value;
+
+  if (!s || *s == '\0') {
+    return 0;
+  }
+  errno = 0;
+  value = strtoul(s, &end, 10);
+  if (errno != 0 || end == s || *end != '\0' || value > 4294967295UL) {
+    return 0;
+  }
+  return 1;
+}
+
+static int parse_roster_id(const char *s) {
+  size_t i;
+
+  if (!s || *s == '\0') {
+    return 0;
+  }
+  for (i = 0; s[i] != '\0'; i++) {
+    if (!isxdigit((unsigned char)s[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* Separa exatamente 6 campos. Campo a mais ou a menos falha. */
+static int split_roster_fields(char *line, char *fields[6]) {
+  int n;
+  char *cursor;
+
+  cursor = line;
+  for (n = 0; n < 5; n++) {
+    char *comma = strchr(cursor, ',');
+
+    if (!comma) {
+      return 0;
+    }
+    *comma = '\0';
+    fields[n] = trim(cursor);
+    cursor = comma + 1;
+  }
+  if (strchr(cursor, ',') != NULL) {
+    return 0;
+  }
+  fields[5] = trim(cursor);
+  return 1;
+}
+
+int node_roster_load(const char *path, uint16_t self_port, node_config_t *out, char *name,
+                     size_t name_cap) {
+  FILE *fp;
+  char line[CONFIG_LINE_MAX];
+  char chosen_name[CONFIG_LINE_MAX];
+  node_endpoint_t first_superpeer;
+  int have_first = 0;
+  int found_self = 0;
+
+  if (!path || !out || !name || name_cap < 2 || self_port == 0) {
+    return 0;
+  }
+
+  memset(out, 0, sizeof *out);
+  memset(&first_superpeer, 0, sizeof first_superpeer);
+  chosen_name[0] = '\0';
+
+  fp = fopen(path, "r");
+  if (!fp) {
+    return 0;
+  }
+
+  while (fgets(line, sizeof line, fp)) {
+    char *fields[6];
+    char *text;
+    node_type_t type;
+    uint32_t ipv4;
+    uint16_t port;
+    size_t n = strlen(line);
+
+    if (n == sizeof(line) - 1 && line[n - 1] != '\n') {
+      fclose(fp);
+      return 0;
+    }
+    if (n > 0 && line[n - 1] == '\n') {
+      line[n - 1] = '\0';
+      n--;
+    }
+    if (n > 0 && line[n - 1] == '\r') {
+      line[n - 1] = '\0';
+    }
+
+    text = trim(line);
+    if (*text == '\0' || *text == '#') {
+      continue;
+    }
+    if (!split_roster_fields(text, fields)) {
+      fclose(fp);
+      return 0;
+    }
+    if (fields[0][0] == '\0' || !parse_type(fields[1], &type) || !parse_ipv4(fields[2], &ipv4) ||
+        !parse_port(fields[3], &port) || !parse_roster_id(fields[4]) || !parse_priority(fields[5])) {
+      fclose(fp);
+      return 0;
+    }
+
+    if (type == SUPERPEER && !have_first) {
+      first_superpeer.ipv4 = ipv4;
+      first_superpeer.port = port;
+      have_first = 1;
+    }
+    if (port != self_port) {
+      continue;
+    }
+    if (found_self) {
+      fclose(fp);
+      return 0;
+    }
+    if (strlen(fields[0]) >= name_cap) {
+      fclose(fp);
+      return 0;
+    }
+    memcpy(chosen_name, fields[0], strlen(fields[0]) + 1);
+    out->ipv4 = ipv4;
+    out->port = port;
+    out->node_type = type;
+    found_self = 1;
+  }
+
+  fclose(fp);
+  if (!found_self) {
+    return 0;
+  }
+  if (have_first && first_superpeer.port != self_port) {
+    out->bootstrap[0] = first_superpeer;
+    out->bootstrap_count = 1;
+  }
+  memcpy(name, chosen_name, strlen(chosen_name) + 1);
+  return 1;
+}

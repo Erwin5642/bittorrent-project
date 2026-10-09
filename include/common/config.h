@@ -8,7 +8,7 @@
 
 /**
  * @file config.h
- * @brief Parser de arquivos .conf (`chave=valor`) e configuração local do nó.
+ * @brief Parser de arquivos .conf (`chave=valor` ou roster CSV) e configuração local do nó.
  */
 
 /** Número máximo de Super Peers de bootstrap. */
@@ -47,5 +47,23 @@ typedef struct {
  *       `bootstrap` vazio ou ausente = primeiro Super Peer da overlay.
  */
 int node_config_load(const char *path, node_config_t *out);
+
+/**
+ * @brief Carrega a linha do próprio nó num roster CSV.
+ *
+ * Cada linha é `nome,tipo,ip,porta,id,prioridade`. A linha cuja porta é
+ * @p self_port preenche @p out e @p name. O bootstrap é a primeira linha
+ * `superpeer` do arquivo quando ela não é o próprio nó; se for, o bootstrap
+ * fica vazio.
+ * @param path Caminho do roster.
+ * @param self_port Porta deste processo, usada para escolher a linha. 0 falha.
+ * @param out Destino da config; o caller aloca.
+ * @param name Nome lógico da linha escolhida. O caller aloca.
+ * @param name_cap Capacidade de @p name, incluindo o NUL.
+ * @return 1 em sucesso, 0 se o arquivo, a porta ou algum campo for inválido.
+ * @note As colunas `id` e `prioridade` são conferidas e não entram no NodeID.
+ */
+int node_roster_load(const char *path, uint16_t self_port, node_config_t *out, char *name,
+                     size_t name_cap);
 
 #endif
