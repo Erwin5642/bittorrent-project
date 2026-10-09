@@ -1,5 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests -pthread
+DEPFLAGS = -MMD -MP
 LDFLAGS = -lcrypto -lz -llz4 -pthread
 
 BIN_DIR = bin
@@ -70,13 +71,13 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 # Ligação
-$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(CHORD_OBJ) $(SUPERPEER_MAIN_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS)
+$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(CHORD_OBJ) $(SUPERPEER_MAIN_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/node: $(BIN_DIR)/superpeer
+$(BIN_DIR)/node: $(BIN_DIR)/superpeer | $(BIN_DIR)
 	cp -f $< $@
 
-$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(PEER_OBJS) $(COMMON_OBJS)
+$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(PEER_OBJS) $(COMMON_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
@@ -121,12 +122,16 @@ $(BIN_DIR)/test_chord_ring: tests/superpeer/test_chord_ring.c $(SUPERPEER_OBJ) $
 # Compila tests/foo.c em obj/tests/foo.o
 $(OBJ_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compila src/foo.c em obj/foo.o (preserva common/ e superpeer/)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+-include $(wildcard $(OBJ_DIR)/common/*.d) $(wildcard $(OBJ_DIR)/superpeer/*.d) \
+	$(wildcard $(OBJ_DIR)/peer/*.d) $(wildcard $(OBJ_DIR)/tests/*.d) \
+	$(wildcard $(OBJ_DIR)/tests/*/*.d)
 
 # Remove executáveis e objetos
 clean:

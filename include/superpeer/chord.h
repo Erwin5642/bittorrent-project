@@ -131,6 +131,14 @@ int chord_apply_notify(chord_t *chord, const chord_node_t *candidate);
 int chord_drop_node(chord_t *chord, const node_id_t *id);
 
 /**
+ * @brief Esvazia o predecessor.
+ * @param chord Anel já criado.
+ * @return 1 em sucesso, 0 se @p chord for nulo.
+ * @note Não mexe na lista de sucessores nem na finger table.
+ */
+int chord_clear_predecessor(chord_t *chord);
+
+/**
  * @brief Um passo de busca: ou o sucessor da chave, ou o finger mais próximo antes dela.
  * @param chord Anel já criado.
  * @param key Identificador procurado.
@@ -168,5 +176,16 @@ int chord_copy_successors(chord_t *chord, chord_node_t *out, unsigned cap, unsig
  * @note Não mexe no predecessor. Os fingers de índice maior ficam como estavam.
  */
 int chord_install_successors(chord_t *chord, const chord_node_t *list, unsigned count, int *changed);
+
+/**
+ * @brief Grava o nó responsável por @c self + 2^index na finger table.
+ * @param chord Anel já criado.
+ * @param index Índice de 0 a @c CHORD_M - 1. 0 é o sucessor imediato.
+ * @param node Nó que passa a ocupar essa entrada.
+ * @param changed Recebe 1 se o identificador da entrada mudou. Pode ser nulo.
+ * @return 1 em sucesso, 0 se o índice ou o nó forem inválidos.
+ * @note Não altera a lista de sucessores nem os outros fingers.
+ */
+int chord_set_finger(chord_t *chord, unsigned index, const chord_node_t *node, int *changed);
 
 #endif

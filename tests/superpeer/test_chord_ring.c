@@ -1,9 +1,15 @@
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
+#include "common/network.h"
+#include "common/protocol.h"
 #include "superpeer/superpeer.h"
 #include "utils/test_utils.h"
 
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -109,9 +115,46 @@ static void test_two_nodes_close_the_ring(void) {
   pthread_mutex_lock(&a.chord.lock);
   expect(a.chord.fingers[0].port == PORT_B, "finger 0 de A aponta para B");
   pthread_mutex_unlock(&a.chord.lock);
+
+  {
+    uint8_t frame[HEADER_SIZE + NODE_ID_SIZE];
+    uint8_t reply[2u + CHORD_LOOKUP_PATH_MAX * CHORD_NODE_WIRE_SIZE];
+    chord_peer_t path[CHORD_LOOKUP_PATH_MAX];
+    pl_header hdr;
+    msg_t msg;
+    unsigned count = 0;
+    int fd;
+
+    fd = net_connect("127.0.0.1", PORT_A);
+    expect(fd >= 0, "lookup conecta em A");
+    if (fd >= 0) {
+      memset(&hdr, 0, sizeof hdr);
+      hdr.protocol_ver = PROTOCOL_VER;
+      hdr.msg_type = FIND_SUCCESSOR;
+      hdr.time = (uint64_t)time(NULL);
+      hdr.pl_size = NODE_ID_SIZE;
+      memcpy(hdr.src_node, a.self_id.bytes, NODE_ID_SIZE);
+      expect(simple_send(fd, frame, b.self_id.bytes, NODE_ID_SIZE, &hdr) == NET_OK,
+             "lookup enviado");
+      msg = simple_recv(fd, reply, sizeof reply);
+      net_close(fd);
+      expect(msg.status == NET_OK && msg.header.msg_type == FIND_SUCCESSOR, "lookup respondido");
+      expect(chord_lookup_path_unpack(path, CHORD_LOOKUP_PATH_MAX, &count, reply,
+                                      msg.header.pl_size) == 1,
+             "caminho do lookup");
+      expect(count >= 2 && path[0].port == PORT_A && path[count - 1].port == PORT_B,
+             "o dono do id de B e B");
+    }
+  }
 }
 
 int main(void) {
+  int rc;
+
   test_two_nodes_close_the_ring();
-  return test_report();
+  rc = test_report();
+  fflush(stdout);
+  fflush(stderr);
+  /* As threads de accept e de manutenção continuam vivas. exit() as encontra no meio de um printf. */
+  _Exit(rc);
 }

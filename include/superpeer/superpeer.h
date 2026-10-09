@@ -177,13 +177,16 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
  *       STORE → ACK/ERROR; LOOKUP → STORE/ERROR; DOWNLOAD_REP → ACK/ERROR;
  *       DOWNLOAD_REQ → DOWNLOAD_REP/ERROR; CLOSEST_PRECEDING, GET_PREDECESSOR
  *       e GET_SUCCESSORS → o mesmo tipo, lido do anel; NOTIFY → ACK.
+ *       FIND_SUCCESSOR → o caminho até o dono do ObjectID, no mesmo tipo.
  *       Chunks ficam em `data/storage`.
  *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder.
  *       Outros tipos: ERROR 3.
  *       Sem limite de conexões simultâneas nem timeout de I/O (MVP). Se
  *       `pthread_create` falhar, a conexão é tratada na thread de accept.
- *       Antes do laço, uma thread de manutenção faz `join`, `stabilize` e
- *       `notify` sem atrasar o `accept`. Sem bootstrap ela não abre socket.
+ *       Antes do laço, uma thread de manutenção faz `join`, `stabilize`,
+ *       `notify`, `fix_fingers` e `check_predecessor` sem atrasar o `accept`.
+ *       Sem bootstrap ela não abre socket. `fix_fingers` avança um índice por
+ *       segundo. RPC do anel que falha tira o nó com `chord_drop_node`.
  */
 int superpeer_run(superpeer_t *sp);
 

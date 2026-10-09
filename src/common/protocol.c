@@ -61,6 +61,7 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[GET_PREDECESSOR] = -1,
 	[GET_SUCCESSORS] = -1,
 	[NOTIFY] = CHORD_NODE_WIRE_SIZE,
+	[FIND_SUCCESSOR] = -1,
 };
 
 /* Tamanho do payload de um tipo, ou -1 se fora de faixa ou ainda sem layout. */
@@ -85,6 +86,7 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [GET_PREDECESSOR] = "GET_PREDECESSOR",
     [GET_SUCCESSORS] = "GET_SUCCESSORS",
     [NOTIFY] = "NOTIFY",
+    [FIND_SUCCESSOR] = "FIND_SUCCESSOR",
 };
 
 /* STORE/LOOKUP/DOWNLOAD_* carregam bytes crus e podem passar do teto de controle. */
@@ -499,6 +501,49 @@ int chord_successors_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, 
 	return 1;
 }
 
+ssize_t chord_lookup_path_pack(const chord_peer_t *nodes, unsigned count, uint8_t *out, size_t out_cap) {
+	unsigned i;
+	size_t need;
+	uint16_t be;
+
+	if (!out || count > CHORD_LOOKUP_PATH_MAX || (count > 0 && !nodes))
+		return -1;
+	need = 2u + (size_t)count * CHORD_NODE_WIRE_SIZE;
+	if (out_cap < need)
+		return -1;
+	be = htons((uint16_t)count);
+	memcpy(out, &be, 2);
+	for (i = 0; i < count; i++) {
+		if (chord_peer_pack(&nodes[i], out + 2u + (size_t)i * CHORD_NODE_WIRE_SIZE) != 0)
+			return -1;
+	}
+	return (ssize_t)need;
+}
+
+int chord_lookup_path_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
+                             size_t in_len) {
+	uint16_t be;
+	unsigned n;
+	unsigned i;
+
+	if (!count || !in || in_len < 2)
+		return 0;
+	memcpy(&be, in, 2);
+	n = ntohs(be);
+	if (n > CHORD_LOOKUP_PATH_MAX || n > cap)
+		return 0;
+	if (in_len != 2u + (size_t)n * CHORD_NODE_WIRE_SIZE)
+		return 0;
+	if (n > 0 && !nodes)
+		return 0;
+	for (i = 0; i < n; i++) {
+		if (chord_peer_unpack(&nodes[i], in + 2u + (size_t)i * CHORD_NODE_WIRE_SIZE) != 0)
+			return 0;
+	}
+	*count = n;
+	return 1;
+}
+
 /* DOWNLOAD_REQ: 32 bytes de ObjectID + uint32 big-endian. */
 ssize_t download_req_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
                           uint8_t *out, size_t out_cap) {
@@ -812,6 +857,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case CLOSEST_PRECEDING:
     case GET_PREDECESSOR:
     case GET_SUCCESSORS:
+    case FIND_SUCCESSOR:
         break;   /* payload cru; o handler desserializa */
     default:
         return NET_ERROR;
