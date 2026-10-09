@@ -57,6 +57,10 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[STATE_TRANSFER] = -1,
 	[ACK] = 32,
 	[ERROR] = 68,
+	[CLOSEST_PRECEDING] = -1,
+	[GET_PREDECESSOR] = -1,
+	[GET_SUCCESSORS] = -1,
+	[NOTIFY] = CHORD_NODE_WIRE_SIZE,
 };
 
 /* Tamanho do payload de um tipo, ou -1 se fora de faixa ou ainda sem layout. */
@@ -77,6 +81,10 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [DOWNLOAD_REP] = "DOWNLOAD_REP",
     [ACK]   = "ACK",
     [ERROR] = "ERROR",
+    [CLOSEST_PRECEDING] = "CLOSEST_PRECEDING",
+    [GET_PREDECESSOR] = "GET_PREDECESSOR",
+    [GET_SUCCESSORS] = "GET_SUCCESSORS",
+    [NOTIFY] = "NOTIFY",
 };
 
 /* STORE/LOOKUP/DOWNLOAD_* carregam bytes crus e podem passar do teto de controle. */
@@ -405,6 +413,92 @@ int lookup_unpack(char *filename, size_t filename_cap, const uint8_t *in, size_t
 	return metadata_name_ok(filename);
 }
 
+int chord_peer_pack(const chord_peer_t *in, uint8_t *out) {
+	uint16_t port_be;
+
+	if (!in || !out)
+		return -1;
+	memcpy(out, in->id, NODE_ID_SIZE);
+	memcpy(out + NODE_ID_SIZE, &in->ipv4, 4);
+	port_be = htons(in->port);
+	memcpy(out + NODE_ID_SIZE + 4, &port_be, 2);
+	return 0;
+}
+
+int chord_peer_unpack(chord_peer_t *out, const uint8_t *in) {
+	uint16_t port_be;
+
+	if (!out || !in)
+		return -1;
+	memset(out, 0, sizeof *out);
+	memcpy(out->id, in, NODE_ID_SIZE);
+	memcpy(&out->ipv4, in + NODE_ID_SIZE, 4);
+	memcpy(&port_be, in + NODE_ID_SIZE + 4, 2);
+	out->port = ntohs(port_be);
+	return 0;
+}
+
+ssize_t chord_closest_reply_pack(uint8_t done, const chord_peer_t *node, uint8_t *out, size_t out_cap) {
+	if (!node || !out || out_cap < CHORD_CLOSEST_REP_SIZE)
+		return -1;
+	if (done != CHORD_STEP_NEXT && done != CHORD_STEP_DONE)
+		return -1;
+	out[0] = done;
+	if (chord_peer_pack(node, out + 1) != 0)
+		return -1;
+	return (ssize_t)CHORD_CLOSEST_REP_SIZE;
+}
+
+int chord_closest_reply_unpack(uint8_t *done, chord_peer_t *node, const uint8_t *in, size_t in_len) {
+	if (!done || !node || !in || in_len != CHORD_CLOSEST_REP_SIZE)
+		return 0;
+	if (in[0] != CHORD_STEP_NEXT && in[0] != CHORD_STEP_DONE)
+		return 0;
+	if (chord_peer_unpack(node, in + 1) != 0)
+		return 0;
+	*done = in[0];
+	return 1;
+}
+
+ssize_t chord_successors_pack(const chord_peer_t *nodes, unsigned count, uint8_t *out, size_t out_cap) {
+	unsigned i;
+	size_t need;
+
+	if (!out || count > CHORD_SUCCESSORS_MAX || (count > 0 && !nodes))
+		return -1;
+	need = 1u + (size_t)count * CHORD_NODE_WIRE_SIZE;
+	if (out_cap < need)
+		return -1;
+	out[0] = (uint8_t)count;
+	for (i = 0; i < count; i++) {
+		if (chord_peer_pack(&nodes[i], out + 1u + (size_t)i * CHORD_NODE_WIRE_SIZE) != 0)
+			return -1;
+	}
+	return (ssize_t)need;
+}
+
+int chord_successors_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
+                            size_t in_len) {
+	unsigned n;
+	unsigned i;
+
+	if (!count || !in || in_len < 1)
+		return 0;
+	n = in[0];
+	if (n > CHORD_SUCCESSORS_MAX || n > cap)
+		return 0;
+	if (in_len != 1u + (size_t)n * CHORD_NODE_WIRE_SIZE)
+		return 0;
+	if (n > 0 && !nodes)
+		return 0;
+	for (i = 0; i < n; i++) {
+		if (chord_peer_unpack(&nodes[i], in + 1u + (size_t)i * CHORD_NODE_WIRE_SIZE) != 0)
+			return 0;
+	}
+	*count = n;
+	return 1;
+}
+
 /* DOWNLOAD_REQ: 32 bytes de ObjectID + uint32 big-endian. */
 ssize_t download_req_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t chunk_index,
                           uint8_t *out, size_t out_cap) {
@@ -633,6 +727,7 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
     case LEAVE: pack_rc = pack_leave((const leave_t *)payload, payload_area); break;
     case ACK:   pack_rc = pack_ack((const ack_t *)payload, payload_area); break;
     case ERROR: pack_rc = pack_error((const error_t *)payload, payload_area); break;
+    case NOTIFY: pack_rc = chord_peer_pack((const chord_peer_t *)payload, payload_area); break;
     case PING:
     case PONG:
         break;                      /* sem payload */
@@ -706,6 +801,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case LEAVE: unpack_rc = unpack_leave(out_payload, payload_area); break;
     case ACK:   unpack_rc = unpack_ack(out_payload, payload_area); break;
     case ERROR: unpack_rc = unpack_error(out_payload, payload_area); break;
+    case NOTIFY: unpack_rc = chord_peer_unpack(out_payload, payload_area); break;
     case PING:
     case PONG:
         break;
@@ -713,7 +809,10 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case LOOKUP:
     case DOWNLOAD_REQ:
     case DOWNLOAD_REP:
-        break;   /* payload cru; o handler desserializa (metadata_unpack, download_rep_unpack) */
+    case CLOSEST_PRECEDING:
+    case GET_PREDECESSOR:
+    case GET_SUCCESSORS:
+        break;   /* payload cru; o handler desserializa */
     default:
         return NET_ERROR;
     }
@@ -813,6 +912,7 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 		case LEAVE: struct_need = sizeof(leave_t); break;
 		case ACK:   struct_need = sizeof(ack_t); break;
 		case ERROR: struct_need = sizeof(error_t); break;
+		case NOTIFY: struct_need = sizeof(chord_peer_t); break;
 		default:    break;
 		}
 		if (struct_need > 0 && (!struct_payload || struct_size < struct_need))

@@ -1,6 +1,9 @@
 #include "../../include/superpeer/chord.h"
+#include "../../include/common/protocol.h"
 
 #include <string.h>
+
+_Static_assert(CHORD_R == CHORD_SUCCESSORS_MAX, "CHORD_R e o teto do fio divergem");
 
 static void chord_node_clear(chord_node_t *node) {
   memset(node, 0, sizeof *node);
@@ -185,6 +188,96 @@ int chord_drop_node(chord_t *chord, const node_id_t *id) {
       chord->fingers[i] = chord->successors[0];
     }
   }
+  pthread_mutex_unlock(&chord->lock);
+  return 1;
+}
+
+int chord_lookup_step(chord_t *chord, const node_id_t *key, int *done, chord_node_t *out) {
+  int i;
+
+  if (!chord || !key || !done || !out) {
+    return 0;
+  }
+
+  pthread_mutex_lock(&chord->lock);
+  if (!chord->self.valid || !chord->successors[0].valid) {
+    pthread_mutex_unlock(&chord->lock);
+    return 0;
+  }
+
+  if (chord_in_half_open(&chord->self.id, &chord->successors[0].id, key)) {
+    *done = 1;
+    *out = chord->successors[0];
+    pthread_mutex_unlock(&chord->lock);
+    return 1;
+  }
+
+  *done = 0;
+  *out = chord->self;
+  for (i = CHORD_M - 1; i >= 0; i--) {
+    if (chord->fingers[i].valid &&
+        chord_in_open(&chord->self.id, key, &chord->fingers[i].id)) {
+      *out = chord->fingers[i];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&chord->lock);
+  return 1;
+}
+
+int chord_copy_predecessor(chord_t *chord, chord_node_t *out) {
+  if (!chord || !out) {
+    return 0;
+  }
+  pthread_mutex_lock(&chord->lock);
+  *out = chord->predecessor;
+  pthread_mutex_unlock(&chord->lock);
+  return 1;
+}
+
+int chord_copy_successors(chord_t *chord, chord_node_t *out, unsigned cap, unsigned *count) {
+  unsigned i;
+  unsigned n;
+
+  if (!chord || !out || !count || cap == 0) {
+    return 0;
+  }
+
+  pthread_mutex_lock(&chord->lock);
+  n = 0;
+  for (i = 0; i < CHORD_R && n < cap; i++) {
+    if (chord->successors[i].valid) {
+      out[n++] = chord->successors[i];
+    }
+  }
+  *count = n;
+  pthread_mutex_unlock(&chord->lock);
+  return 1;
+}
+
+int chord_install_successors(chord_t *chord, const chord_node_t *list, unsigned count, int *changed) {
+  unsigned i;
+
+  if (!chord || !list || count == 0 || count > CHORD_R || !list[0].valid) {
+    return 0;
+  }
+  for (i = 0; i < count; i++) {
+    if (!list[i].valid) {
+      return 0;
+    }
+  }
+
+  pthread_mutex_lock(&chord->lock);
+  if (changed) {
+    *changed = !chord->successors[0].valid || node_id_cmp(&chord->successors[0].id, &list[0].id) != 0;
+  }
+  for (i = 0; i < CHORD_R; i++) {
+    chord_node_clear(&chord->successors[i]);
+  }
+  for (i = 0; i < count; i++) {
+    chord->successors[i] = list[i];
+  }
+  chord->fingers[0] = list[0];
   pthread_mutex_unlock(&chord->lock);
   return 1;
 }

@@ -130,4 +130,43 @@ int chord_apply_notify(chord_t *chord, const chord_node_t *candidate);
  */
 int chord_drop_node(chord_t *chord, const node_id_t *id);
 
+/**
+ * @brief Um passo de busca: ou o sucessor da chave, ou o finger mais próximo antes dela.
+ * @param chord Anel já criado.
+ * @param key Identificador procurado.
+ * @param done Recebe 1 se @p out for o sucessor de @p key, 0 se for só o próximo salto.
+ * @param out Recebe o nó. O caller aloca.
+ * @return 1 em sucesso, 0 se algum ponteiro for nulo ou o anel ainda não tiver sucessor.
+ */
+int chord_lookup_step(chord_t *chord, const node_id_t *key, int *done, chord_node_t *out);
+
+/**
+ * @brief Copia o predecessor.
+ * @param chord Anel já criado.
+ * @param out Recebe a entrada. @c valid fica 0 quando não há predecessor.
+ * @return 1 em sucesso, 0 se algum ponteiro for nulo.
+ */
+int chord_copy_predecessor(chord_t *chord, chord_node_t *out);
+
+/**
+ * @brief Copia os sucessores válidos, na ordem da lista.
+ * @param chord Anel já criado.
+ * @param out Destino; o caller aloca @p cap entradas.
+ * @param cap Capacidade de @p out.
+ * @param count Recebe quantos foram copiados.
+ * @return 1 em sucesso, 0 se algum ponteiro for nulo ou @p cap for 0.
+ */
+int chord_copy_successors(chord_t *chord, chord_node_t *out, unsigned cap, unsigned *count);
+
+/**
+ * @brief Substitui a lista de sucessores e alinha @c fingers[0] com o primeiro.
+ * @param chord Anel já criado.
+ * @param list Nós em ordem. @c [0] é o sucessor imediato.
+ * @param count Quantidade em @p list, de 1 a @c CHORD_R.
+ * @param changed Recebe 1 se o identificador do sucessor imediato mudou. Pode ser nulo.
+ * @return 1 em sucesso, 0 se a lista for nula, vazia ou maior que @c CHORD_R.
+ * @note Não mexe no predecessor. Os fingers de índice maior ficam como estavam.
+ */
+int chord_install_successors(chord_t *chord, const chord_node_t *list, unsigned count, int *changed);
+
 #endif
