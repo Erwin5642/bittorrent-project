@@ -118,6 +118,12 @@ static void test_solo_ring(void) {
   expect(chord.predecessor.valid == 0, "predecessor removido junto");
   expect(chord.fingers[3].port == 5103, "finger do no removido aponta para o novo sucessor");
 
+  expect(chord_apply_notify(&chord, &nearer) == 1, "repoe um predecessor");
+  expect(chord_clear_predecessor(NULL) == 0, "limpar predecessor nulo falha");
+  expect(chord_clear_predecessor(&chord) == 1, "esvazia o predecessor");
+  expect(chord.predecessor.valid == 0, "predecessor ficou vazio");
+  expect(chord.successors[0].port == 5103, "limpar o predecessor nao mexe no sucessor");
+
   chord_shutdown(&chord);
 }
 
@@ -148,6 +154,40 @@ static void test_install_successors(void) {
   changed = 1;
   expect(chord_install_successors(&chord, list, 2, &changed) == 1, "reinstala a mesma lista");
   expect(changed == 0, "o mesmo sucessor nao e uma mudanca");
+  chord_shutdown(&chord);
+}
+
+static void test_set_finger(void) {
+  chord_t chord;
+  chord_node_t self;
+  chord_node_t hop;
+  node_id_t owner;
+  node_id_t succ;
+  node_id_t start;
+  int changed = 0;
+
+  self = sample(10, 5101);
+  hop = sample(40, 5104);
+  expect(chord_init(&chord) == 1, "init do finger");
+  expect(chord_create(&chord, &self.id, 0x0100007f, 5101) == 1, "anel do finger");
+  expect(chord_set_finger(NULL, 1, &hop, &changed) == 0, "finger sem anel falha");
+  expect(chord_set_finger(&chord, CHORD_M, &hop, &changed) == 0, "indice fora da faixa falha");
+  expect(chord_set_finger(&chord, 2, &hop, &changed) == 1, "grava o finger 2");
+  expect(changed == 1, "finger 2 mudou");
+  expect(chord.fingers[2].port == 5104, "finger 2 aponta para 5104");
+  expect(chord.fingers[0].port == 5101, "finger 0 nao acompanha o 2");
+  expect(chord.successors[0].port == 5101, "sucessor nao muda com o finger");
+  changed = 1;
+  expect(chord_set_finger(&chord, 2, &hop, &changed) == 1, "regrava o mesmo finger");
+  expect(changed == 0, "o mesmo finger nao e uma mudanca");
+
+  owner = id_byte(NODE_ID_SIZE - 1, 10);
+  succ = id_byte(NODE_ID_SIZE - 1, 20);
+  expect(chord_id_add_pow2(&owner, 0, &start) == 1, "inicio do finger 0");
+  expect(chord_in_half_open(&owner, &succ, &start) == 1, "self+1 ainda cabe no sucessor");
+  expect(chord_id_add_pow2(&owner, 4, &start) == 1, "inicio do finger 4");
+  expect(chord_in_half_open(&owner, &succ, &start) == 0, "self+16 ja passou do sucessor");
+  expect(chord_in_half_open(&owner, &owner, &start) == 1, "no sozinho cobre qualquer inicio");
   chord_shutdown(&chord);
 }
 
@@ -254,6 +294,27 @@ static void test_chord_wire(void) {
   expect(payload_size_for(CLOSEST_PRECEDING) < 0, "closest aceita pedido e resposta");
   expect(payload_size_for(GET_PREDECESSOR) < 0, "predecessor aceita corpo vazio");
   expect(message_type_name(GET_SUCCESSORS)[0] == 'G', "nome de GET_SUCCESSORS");
+  expect(payload_size_for(FIND_SUCCESSOR) < 0, "lookup aceita caminho variavel");
+
+  {
+    chord_peer_t hops[2];
+    chord_peer_t back[2];
+    uint8_t raw[2u + 2u * CHORD_NODE_WIRE_SIZE];
+    unsigned got = 0;
+    ssize_t bytes;
+
+    memset(hops, 0, sizeof hops);
+    hops[0].port = 5101;
+    hops[1].port = 5105;
+    hops[1].id[0] = 0xab;
+    bytes = chord_lookup_path_pack(hops, 2, raw, sizeof raw);
+    expect(bytes == (ssize_t)(2u + 2u * CHORD_NODE_WIRE_SIZE), "caminho de dois saltos");
+    expect(chord_lookup_path_unpack(back, 2, &got, raw, (size_t)bytes) == 1, "caminho lido");
+    expect(got == 2 && back[0].port == 5101 && back[1].port == 5105, "portas do caminho");
+    expect(back[1].id[0] == 0xab, "id do dono");
+    expect(chord_lookup_path_pack(hops, CHORD_LOOKUP_PATH_MAX + 1, raw, sizeof raw) < 0,
+           "caminho longo demais falha");
+  }
 }
 
 int main(void) {
@@ -261,6 +322,7 @@ int main(void) {
   test_intervals();
   test_solo_ring();
   test_install_successors();
+  test_set_finger();
   test_lookup_step();
   test_chord_wire();
   return test_report();

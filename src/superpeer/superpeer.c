@@ -574,6 +574,9 @@ static chord_node_t node_from_peer(const chord_peer_t *src) {
   return node;
 }
 
+static int lookup_path(superpeer_t *sp, const node_id_t *key, chord_node_t *path, unsigned cap,
+                       unsigned *count);
+
 static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer_addr) {
   uint8_t *in_buf = malloc(MAX_DATA_PAYLOAD_SZ);
   control_payload_t payload;
@@ -778,6 +781,33 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
     memset(&ack, 0, sizeof ack);
     memcpy(ack.node_id, payload.notify.id, NODE_ID_SIZE);
     send_ack(conn, &msg.header, &sp->self_id, &ack);
+  } else if (msg.header.msg_type == FIND_SUCCESSOR) {
+    node_id_t key;
+    chord_node_t path[CHORD_LOOKUP_PATH_MAX];
+    chord_peer_t peers[CHORD_LOOKUP_PATH_MAX];
+    uint8_t reply[2u + CHORD_LOOKUP_PATH_MAX * CHORD_NODE_WIRE_SIZE];
+    unsigned count = 0;
+    unsigned i;
+    ssize_t n;
+
+    if (msg.header.pl_size != NODE_ID_SIZE) {
+      send_error(conn, &msg.header, &sp->self_id, 1, "malformed FIND_SUCCESSOR payload");
+    } else {
+      memcpy(key.bytes, in_buf, NODE_ID_SIZE);
+      if (!lookup_path(sp, &key, path, CHORD_LOOKUP_PATH_MAX, &count) || count == 0) {
+        send_error(conn, &msg.header, &sp->self_id, 1, "chord lookup failed");
+      } else {
+        for (i = 0; i < count; i++) {
+          peer_from_node(&peers[i], &path[i]);
+        }
+        n = chord_lookup_path_pack(peers, count, reply, sizeof reply);
+        if (n < 0) {
+          send_error(conn, &msg.header, &sp->self_id, 1, "malformed FIND_SUCCESSOR payload");
+        } else {
+          send_raw(conn, &msg.header, &sp->self_id, FIND_SUCCESSOR, reply, (uint32_t)n);
+        }
+      }
+    }
   } else {
     send_error(conn, &msg.header, &sp->self_id, 3, "unsupported message type");
   }
@@ -831,6 +861,28 @@ static void log_successor(const chord_node_t *node) {
   }
   printf("Successor -> %s:%u\nFinger[0] -> %s:%u\n", ip, (unsigned)node->port, ip, (unsigned)node->port);
   fflush(stdout);
+}
+
+static void drop_failed(superpeer_t *sp, const chord_node_t *node) {
+  chord_node_t before;
+  chord_node_t after;
+  unsigned n = 0;
+  int had;
+
+  if (!sp || !node || !node->valid || endpoint_is_self(sp, node->ipv4, node->port)) {
+    return;
+  }
+  had = chord_copy_successors(&sp->chord, &before, 1, &n) && n == 1;
+  if (!chord_drop_node(&sp->chord, &node->id)) {
+    return;
+  }
+  n = 0;
+  if (!had || !chord_copy_successors(&sp->chord, &after, 1, &n) || n != 1) {
+    return;
+  }
+  if (node_id_cmp(&before.id, &after.id) != 0) {
+    log_successor(&after);
+  }
 }
 
 static void install_successor_list(superpeer_t *sp, const chord_node_t *list, unsigned count) {
@@ -933,6 +985,54 @@ static int rpc_closest(superpeer_t *sp, const chord_node_t *dest, const node_id_
   return 1;
 }
 
+/* Caminho do lookup iterativo. O primeiro nó é este processo; o último é o dono. */
+static int lookup_path(superpeer_t *sp, const node_id_t *key, chord_node_t *path, unsigned cap,
+                       unsigned *count) {
+  chord_node_t current;
+  unsigned n = 0;
+  unsigned hop;
+
+  if (!sp || !key || !path || !count || cap == 0) {
+    return 0;
+  }
+  pthread_mutex_lock(&sp->chord.lock);
+  current = sp->chord.self;
+  pthread_mutex_unlock(&sp->chord.lock);
+  if (!current.valid) {
+    return 0;
+  }
+  path[n++] = current;
+
+  for (hop = 0; hop < CHORD_M && n < cap; hop++) {
+    int done = 0;
+    chord_node_t step;
+
+    if (!rpc_closest(sp, &current, key, &done, &step) || !step.valid) {
+      if (!endpoint_is_self(sp, current.ipv4, current.port)) {
+        drop_failed(sp, &current);
+      }
+      return 0;
+    }
+    if (done) {
+      if (step.ipv4 != path[n - 1].ipv4 || step.port != path[n - 1].port) {
+        if (n >= cap) {
+          return 0;
+        }
+        path[n++] = step;
+      }
+      *count = n;
+      return 1;
+    }
+    if (endpoint_is_self(sp, step.ipv4, step.port) ||
+        (step.ipv4 == current.ipv4 && step.port == current.port)) {
+      return 0;
+    }
+    path[n++] = step;
+    current = step;
+  }
+  return 0;
+}
+
 static int find_successor_from(superpeer_t *sp, chord_node_t current, const node_id_t *key, chord_node_t *out) {
   unsigned hop;
 
@@ -941,6 +1041,9 @@ static int find_successor_from(superpeer_t *sp, chord_node_t current, const node
     chord_node_t step;
 
     if (!rpc_closest(sp, &current, key, &done, &step)) {
+      if (!endpoint_is_self(sp, current.ipv4, current.port)) {
+        drop_failed(sp, &current);
+      }
       return 0;
     }
     if (done) {
@@ -1137,6 +1240,7 @@ static void stabilize(superpeer_t *sp) {
     return;
   }
   if (!rpc_predecessor(sp, &succ, &learned, &present)) {
+    drop_failed(sp, &succ);
     return;
   }
   if (present && learned.valid && !endpoint_is_self(sp, learned.ipv4, learned.port) &&
@@ -1148,11 +1252,100 @@ static void stabilize(superpeer_t *sp) {
   if (endpoint_is_self(sp, succ.ipv4, succ.port)) {
     return;
   }
-  if (pull_successors(sp, &succ, list, &n)) {
-    install_successor_list(sp, list, n);
-    remember_superpeers(sp, list, n);
+  if (!pull_successors(sp, &succ, list, &n)) {
+    drop_failed(sp, &succ);
+    return;
   }
-  rpc_notify(sp, &succ);
+  install_successor_list(sp, list, n);
+  remember_superpeers(sp, list, n);
+  if (!rpc_notify(sp, &succ)) {
+    drop_failed(sp, &succ);
+  }
+}
+
+static int rpc_ping(superpeer_t *sp, const chord_node_t *dest) {
+  uint8_t frame[HEADER_SIZE];
+  uint8_t reply[8];
+  pl_header hdr;
+  msg_t msg;
+  int fd;
+
+  fd = connect_node(dest);
+  if (fd < 0) {
+    return 0;
+  }
+  memset(&hdr, 0, sizeof hdr);
+  hdr.protocol_ver = PROTOCOL_VER;
+  hdr.msg_type = PING;
+  hdr.time = (uint64_t)time(NULL);
+  hdr.pl_size = 0;
+  memcpy(hdr.src_node, sp->self_id.bytes, NODE_ID_SIZE);
+  if (send_message(fd, frame, sizeof frame, NULL, &hdr) != NET_OK) {
+    net_close(fd);
+    return 0;
+  }
+  msg = simple_recv(fd, reply, sizeof reply);
+  net_close(fd);
+  return msg.status == NET_OK && msg.header.msg_type == PONG;
+}
+
+/* Predecessor igual a si mesmo não abre socket. Sem PONG, o campo fica vazio. */
+static void check_predecessor(superpeer_t *sp) {
+  chord_node_t pred;
+
+  if (!chord_copy_predecessor(&sp->chord, &pred) || !pred.valid) {
+    return;
+  }
+  if (endpoint_is_self(sp, pred.ipv4, pred.port)) {
+    return;
+  }
+  if (rpc_ping(sp, &pred)) {
+    return;
+  }
+  chord_clear_predecessor(&sp->chord);
+}
+
+static void log_finger(unsigned index, const chord_node_t *node) {
+  char ip[INET_ADDRSTRLEN];
+
+  if (!node || !node->valid || !inet_ntop(AF_INET, &node->ipv4, ip, sizeof ip)) {
+    return;
+  }
+  printf("Finger[%u] -> %s:%u\n", index, ip, (unsigned)node->port);
+  fflush(stdout);
+}
+
+/* Um índice por vez. Se self+2^i ainda cabe em (self, finger anterior], copia sem socket. */
+static void fix_one_finger(superpeer_t *sp, unsigned index) {
+  chord_node_t self;
+  chord_node_t previous;
+  chord_node_t found;
+  node_id_t start;
+  int changed = 0;
+
+  if (index >= CHORD_M) {
+    return;
+  }
+  pthread_mutex_lock(&sp->chord.lock);
+  self = sp->chord.self;
+  previous = (index == 0) ? sp->chord.successors[0] : sp->chord.fingers[index - 1];
+  pthread_mutex_unlock(&sp->chord.lock);
+  if (!self.valid || !previous.valid || !chord_id_add_pow2(&self.id, index, &start)) {
+    return;
+  }
+
+  if (chord_in_half_open(&self.id, &previous.id, &start)) {
+    found = previous;
+  } else if (!find_successor_from(sp, self, &start, &found) || !found.valid) {
+    found = previous;
+  }
+  if (!chord_set_finger(&sp->chord, index, &found, &changed)) {
+    return;
+  }
+  if (changed) {
+    log_finger(index, &found);
+  }
+  remember_superpeers(sp, &found, 1);
 }
 
 static void *chord_maintenance(void *arg) {
@@ -1165,6 +1358,7 @@ static void *chord_maintenance(void *arg) {
   uint64_t next_stab = start;
   chord_node_t succ;
   unsigned n = 0;
+  unsigned finger_i = 0;
 
   if (chord_copy_successors(&sp->chord, &succ, 1, &n) && n == 1) {
     log_successor(&succ);
@@ -1187,6 +1381,9 @@ static void *chord_maintenance(void *arg) {
     now = mono_ms();
     if (now >= next_stab) {
       stabilize(sp);
+      fix_one_finger(sp, finger_i);
+      finger_i = (finger_i + 1u) % CHORD_M;
+      check_predecessor(sp);
       next_stab = mono_ms() + CHORD_MAINT_PERIOD_MS;
     }
     now = mono_ms();

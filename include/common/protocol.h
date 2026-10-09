@@ -79,6 +79,7 @@ enum message_type{
 	GET_PREDECESSOR, /**< Pede o predecessor no anel. */
 	GET_SUCCESSORS,  /**< Pede a lista de sucessores. */
 	NOTIFY,          /**< Avisa o sucessor de um nó recém-chegado (payload @c chord_peer_t). */
+	FIND_SUCCESSOR,  /**< Caminho de lookup até o dono de um ObjectID. */
 	MSG_TYPE_MAX,    /**< Sentinela: número de tipos válidos. */
 };
 
@@ -305,6 +306,12 @@ int send_leave(int fd, const node_id_t *self, const leave_t *leave);
 #define CHORD_STEP_DONE 1
 /** Máximo de sucessores em @c GET_SUCCESSORS. Igual a @c CHORD_R. */
 #define CHORD_SUCCESSORS_MAX 3u
+/**
+ * @brief Máximo de saltos numa resposta de @c FIND_SUCCESSOR.
+ *
+ * Cabe em @c MAX_CONTROL_PAYLOAD_SZ junto com a contagem de 2 bytes.
+ */
+#define CHORD_LOOKUP_PATH_MAX 64u
 
 /**
  * @brief Nó do Chord como payload, sem o status nem a contagem.
@@ -374,6 +381,30 @@ ssize_t chord_successors_pack(const chord_peer_t *nodes, unsigned count, uint8_t
  */
 int chord_successors_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
                             size_t in_len);
+
+/**
+ * @brief Empacota o caminho de @c FIND_SUCCESSOR.
+ *
+ * A contagem sai em 2 bytes big-endian, seguida dos nós. O último é o dono da chave.
+ * @param nodes Nós do caminho, o primeiro é quem recebeu o pedido. Nulo se @p count for 0.
+ * @param count Quantidade, no máximo @c CHORD_LOOKUP_PATH_MAX.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out.
+ * @return Bytes escritos, ou -1 se a lista ou o buffer forem inválidos.
+ */
+ssize_t chord_lookup_path_pack(const chord_peer_t *nodes, unsigned count, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Lê o caminho empacotado por @c chord_lookup_path_pack.
+ * @param nodes Destino; o caller aloca @p cap entradas.
+ * @param cap Capacidade de @p nodes.
+ * @param count Recebe a quantidade lida.
+ * @param in Payload recebido.
+ * @param in_len Tamanho de @p in.
+ * @return 1 em sucesso, 0 se o buffer ou a contagem forem inválidos.
+ */
+int chord_lookup_path_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count, const uint8_t *in,
+                             size_t in_len);
 
 /**
  * @brief Tamanho fixo do payload de um tipo de controle.

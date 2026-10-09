@@ -192,6 +192,16 @@ int chord_drop_node(chord_t *chord, const node_id_t *id) {
   return 1;
 }
 
+int chord_clear_predecessor(chord_t *chord) {
+  if (!chord) {
+    return 0;
+  }
+  pthread_mutex_lock(&chord->lock);
+  chord_node_clear(&chord->predecessor);
+  pthread_mutex_unlock(&chord->lock);
+  return 1;
+}
+
 int chord_lookup_step(chord_t *chord, const node_id_t *key, int *done, chord_node_t *out) {
   int i;
 
@@ -278,6 +288,20 @@ int chord_install_successors(chord_t *chord, const chord_node_t *list, unsigned 
     chord->successors[i] = list[i];
   }
   chord->fingers[0] = list[0];
+  pthread_mutex_unlock(&chord->lock);
+  return 1;
+}
+
+int chord_set_finger(chord_t *chord, unsigned index, const chord_node_t *node, int *changed) {
+  if (!chord || !node || !node->valid || index >= CHORD_M) {
+    return 0;
+  }
+
+  pthread_mutex_lock(&chord->lock);
+  if (changed) {
+    *changed = !chord->fingers[index].valid || node_id_cmp(&chord->fingers[index].id, &node->id) != 0;
+  }
+  chord->fingers[index] = *node;
   pthread_mutex_unlock(&chord->lock);
   return 1;
 }
