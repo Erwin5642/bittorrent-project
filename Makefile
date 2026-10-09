@@ -1,5 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -Iinclude -Itests -pthread
+DEPFLAGS = -MMD -MP
 LDFLAGS = -lcrypto -lz -llz4 -pthread
 
 BIN_DIR = bin
@@ -42,12 +43,13 @@ TEST_DOWNLOAD = $(BIN_DIR)/test_download
 TEST_CHUNK_WIRE = $(BIN_DIR)/test_chunk_wire
 TEST_CHUNK_SERVICE = $(BIN_DIR)/test_chunk_service
 TEST_CHORD = $(BIN_DIR)/test_chord
+TEST_CHORD_RING = $(BIN_DIR)/test_chord_ring
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
@@ -60,6 +62,7 @@ test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMP
 	$(TEST_CHUNK_WIRE)
 	$(TEST_CHUNK_SERVICE)
 	$(TEST_CHORD)
+	$(TEST_CHORD_RING)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -68,13 +71,13 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 # Ligação
-$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(CHORD_OBJ) $(SUPERPEER_MAIN_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS)
+$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(CHORD_OBJ) $(SUPERPEER_MAIN_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/node: $(BIN_DIR)/superpeer
+$(BIN_DIR)/node: $(BIN_DIR)/superpeer | $(BIN_DIR)
 	cp -f $< $@
 
-$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(PEER_OBJS) $(COMMON_OBJS)
+$(BIN_DIR)/client: $(PEER_MAIN_OBJ) $(PEER_OBJS) $(COMMON_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
@@ -110,18 +113,25 @@ $(BIN_DIR)/test_chunk_wire: tests/common/test_chunk_wire.c $(OBJ_DIR)/common/pro
 $(BIN_DIR)/test_chunk_service: tests/superpeer/test_chunk_service.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(CHORD_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/test_chord: tests/superpeer/test_chord.c $(CHORD_OBJ) $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/test_chord: tests/superpeer/test_chord.c $(CHORD_OBJ) $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_chord_ring: tests/superpeer/test_chord_ring.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(CHORD_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compila tests/foo.c em obj/tests/foo.o
 $(OBJ_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compila src/foo.c em obj/foo.o (preserva common/ e superpeer/)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+-include $(wildcard $(OBJ_DIR)/common/*.d) $(wildcard $(OBJ_DIR)/superpeer/*.d) \
+	$(wildcard $(OBJ_DIR)/peer/*.d) $(wildcard $(OBJ_DIR)/tests/*.d) \
+	$(wildcard $(OBJ_DIR)/tests/*/*.d)
 
 # Remove executáveis e objetos
 clean:
