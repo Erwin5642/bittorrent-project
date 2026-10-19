@@ -8,7 +8,7 @@ Este documento descreve **como** o Aluno 1 implementa a sua parte do CP2: o pipe
 
 Fazer o `peer` **publicar** e **baixar** um documento PDF de ponta a ponta, executando o pipeline da spec:
 
-```
+```text
 arquivo → SHA-256 → fragmentação (chunking) → LZ4 → checksum → transferência
 ```
 
@@ -16,7 +16,7 @@ e o caminho inverso no download (recepção → checksum → LZ4 decode → SHA-
 
 Ao final, os itens de verificação do CP2 devem funcionar:
 
-```
+```text
 ./peer upload arquivo.pdf
 File: arquivo.pdf
 Size: 12458291 bytes
