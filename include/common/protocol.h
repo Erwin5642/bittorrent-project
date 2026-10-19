@@ -415,6 +415,30 @@ int chord_lookup_path_unpack(chord_peer_t *nodes, unsigned cap, unsigned *count,
 int send_heartbeat(int fd, const node_id_t *self);
 
 /**
+ * @brief Inicia uma eleição Bully: envia ELECTION (mensagem de origem, sem payload).
+ * @param fd Socket conectado ao nó de maior prioridade.
+ * @param self NodeID de quem inicia a eleição (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_election(int fd, const node_id_t *self);
+
+/**
+ * @brief Responde OK a um ELECTION, sinalizando que há nó superior vivo. Sem payload.
+ * @param fd Socket conectado ao nó que iniciou a eleição.
+ * @param self NodeID de quem responde (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_ok(int fd, const node_id_t *self);
+
+/**
+ * @brief Anuncia o novo coordenador eleito: envia COORDINATOR (mensagem de origem), sem payload.
+ * @param fd Socket conectado a um dos demais Super Peers.
+ * @param self NodeID do coordenador eleito (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_coordinator(int fd, const node_id_t *self);
+
+/**
  * @brief Tamanho fixo do payload de um tipo de controle.
  * @param t Valor de @c message_type.
  * @return Bytes do payload (0 para PING/PONG), ou @c -1 se @p t estiver fora de faixa.
