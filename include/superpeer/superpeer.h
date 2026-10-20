@@ -35,6 +35,9 @@
 /** Tempo que um CANDIDATE que recebeu OK espera por um COORDINATOR antes de reiniciar a eleição (CP4), em segundos. */
 #define COORDINATOR_WAIT_SEC 15
 
+/** Espera inicial antes da primeira eleição no boot (CP4), para a membership povoar, em segundos. */
+#define ELECTION_BOOT_GRACE_SEC 5
+
 /**
  * @brief Estado de um membro na tabela local.
  */
@@ -89,6 +92,7 @@ typedef struct {
   node_id_t coordinator_id;          /**< NodeID de quem este nó considera coordenador (CP4). */
   int has_coordinator;               /**< 1 se @c coordinator_id é válido. */
   coord_role_t coord_role;           /**< Papel deste nó na eleição Bully. */
+  int election_needed;               /**< 1 pede que a thread de eleição rode uma eleição (CP4). */
   pthread_mutex_t coord_lock;        /**< Serializa os campos de coordenação acima. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
   pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
