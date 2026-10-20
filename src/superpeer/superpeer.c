@@ -175,6 +175,12 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     return 0;
   }
 
+  /* Estado de coordenação (CP4): começa sem coordenador conhecido, como FOLLOWER.
+     A eleição Bully no boot decide o líder inicial. */
+  memset(&sp->coordinator_id, 0, sizeof sp->coordinator_id);
+  sp->has_coordinator = 0;
+  sp->coord_role = COORD_FOLLOWER;
+
   if (pthread_mutex_init(&sp->members_lock, NULL) != 0) {
     fprintf(stderr, "superpeer_init: failed to init mutex\n");
     return 0;
@@ -184,8 +190,15 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
+  if (pthread_mutex_init(&sp->coord_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init coord mutex\n");
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
   if (!chord_init(&sp->chord)) {
     fprintf(stderr, "superpeer_init: failed to init chord\n");
+    pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
@@ -193,6 +206,7 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   if (!chord_create(&sp->chord, &sp->self_id, cfg.ipv4, cfg.port)) {
     fprintf(stderr, "superpeer_init: failed to create chord ring\n");
     chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
@@ -200,6 +214,7 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   fd = net_listen(cfg.port);
   if (fd < 0) {
     chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
