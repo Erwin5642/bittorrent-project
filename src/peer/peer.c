@@ -231,6 +231,109 @@ static int cmd_download(const char *name, const char *output, const char *conf,
 	return 0;
 }
 
+/* Subcomando (CP4): --cmd put --name <nome> --value <valor>
+ * PUT é STORE: o registro vai sem chunks, com ObjectID = SHA-256(nome || valor)
+ * e size = tamanho do valor. Sai 0 só com o ACK do Super Peer. */
+static int cmd_put(const char *name, const char *value, const char *conf,
+                   const char *host_opt, long port_opt) {
+	peer_t self;
+	node_config_t cfg;
+	file_metadata_t meta;
+	node_id_t oid;
+	char host[INET_ADDRSTRLEN];
+	char hex[NODE_ID_HEX_SIZE];
+	uint16_t port = 0;
+	uint8_t *concat;
+	size_t name_len;
+	size_t value_len;
+	int ok;
+
+	if (!name || !value) {
+		fprintf(stderr, "put: faltou --name <nome> e/ou --value <valor>\n");
+		return 1;
+	}
+	name_len = strlen(name);
+	value_len = strlen(value);
+	if (name_len == 0 || name_len >= METADATA_FILENAME_MAX) {
+		fprintf(stderr, "put: --name precisa de 1 a %d caracteres\n", METADATA_FILENAME_MAX - 1);
+		return 1;
+	}
+	peer_identity(&self, &cfg, conf);
+	if (!peer_endpoint(&cfg, host_opt, port_opt, host, sizeof host, &port)) {
+		fprintf(stderr, "put: sem Super Peer (use --port ou bootstrap no .conf)\n");
+		return 1;
+	}
+
+	metadata_init(&meta);
+	concat = malloc(name_len + value_len + 1);
+	if (!concat)
+		return 1;
+	memcpy(concat, name, name_len);
+	memcpy(concat + name_len, value, value_len);
+	ok = sha256(concat, name_len + value_len, meta.object_id);
+	free(concat);
+	if (!ok) {
+		fprintf(stderr, "put: falha ao calcular o ObjectID\n");
+		return 1;
+	}
+	memcpy(meta.filename, name, name_len + 1);
+	meta.size = (uint64_t)value_len;
+	meta.chunk_count = 0;
+	meta.version = 1;
+	meta.owner = self.node_id;
+
+	memcpy(oid.bytes, meta.object_id, NODE_ID_SIZE);
+	node_id_to_hex(&oid, hex, sizeof hex);
+	printf("PUT %s\nObjectID: %s\n", name, hex);
+	fflush(stdout);
+	if (!store_to_superpeer(&self, host, port, &meta)) {
+		fprintf(stderr, "put: Super Peer nao confirmou %s\n", name);
+		return 1;
+	}
+	return 0;
+}
+
+/* Subcomando (CP4): --cmd state --host <ip> --port <porta>
+ * Pede GET_STATE e imprime o texto que o Super Peer montou. */
+static int cmd_state(const char *host, long port) {
+	uint8_t frame[HEADER_SIZE];
+	uint8_t reply[MAX_CONTROL_PAYLOAD_SZ + 1];
+	pl_header hdr;
+	msg_t msg;
+	node_id_t self;
+	int fd;
+
+	if (!host || port < 1 || port > 65535) {
+		fprintf(stderr, "state: faltou --host <ip> --port <porta>\n");
+		return 1;
+	}
+
+	memset(&self, 0, sizeof self);
+	fd = net_connect(host, (uint16_t)port);
+	if (fd < 0)
+		return 1;
+
+	memset(&hdr, 0, sizeof hdr);
+	hdr.protocol_ver = PROTOCOL_VER;
+	hdr.msg_type = GET_STATE;
+	hdr.time = (uint64_t)time(NULL);
+	hdr.pl_size = 0;
+	memcpy(hdr.src_node, self.bytes, NODE_ID_SIZE);
+	if (simple_send(fd, frame, NULL, 0, &hdr) != NET_OK) {
+		net_close(fd);
+		return 1;
+	}
+	msg = simple_recv(fd, reply, MAX_CONTROL_PAYLOAD_SZ);
+	net_close(fd);
+	if (msg.status != NET_OK || msg.header.msg_type != GET_STATE) {
+		fprintf(stderr, "state: Super Peer nao devolveu o estado\n");
+		return 1;
+	}
+	reply[msg.header.pl_size] = '\0';
+	printf("State %s:%ld\n%s", host, port, (const char *)reply);
+	return 0;
+}
+
 static int hex_nibble(char c) {
 	if (c >= '0' && c <= '9')
 		return c - '0';
@@ -336,6 +439,7 @@ int main(int argc, char* argv[]){
     const char *output = NULL;
     const char *conf = NULL;
     const char *object_id = NULL;
+    const char *value = NULL;
     long port = 0;
 
     static struct option long_opts[] = {
@@ -347,11 +451,12 @@ int main(int argc, char* argv[]){
         {"output",    required_argument, NULL, 'o'},
         {"config",    required_argument, NULL, 'g'},
         {"object-id", required_argument, NULL, 'i'},
+        {"value",     required_argument, NULL, 'v'},
         {NULL,        0,                 NULL,  0 }
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:i:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:i:v:", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'c': cmd = optarg; break;
         case 'h': host = optarg; break;
@@ -360,6 +465,7 @@ int main(int argc, char* argv[]){
         case 'o': output = optarg; break;
         case 'g': conf = optarg; break;
         case 'i': object_id = optarg; break;
+        case 'v': value = optarg; break;
         case 'p': {
             char *end;
             port = strtol(optarg, &end, 10);
@@ -370,13 +476,13 @@ int main(int argc, char* argv[]){
             break;
         }
         default:
-            fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave|lookup> ...\n", argv[0]);
+            fprintf(stderr, "uso: %s --cmd <upload|download|put|state|ping|join|leave|lookup> ...\n", argv[0]);
             return 1;
         }
     }
 
     if (!cmd) {
-        fprintf(stderr, "uso: %s --cmd <upload|download|ping|join|leave|lookup> ...\n", argv[0]);
+        fprintf(stderr, "uso: %s --cmd <upload|download|put|state|ping|join|leave|lookup> ...\n", argv[0]);
         return 1;
     }
 
@@ -387,6 +493,10 @@ int main(int argc, char* argv[]){
         return cmd_download(name, output, conf, host, port);
     if (strcmp(cmd, "lookup") == 0)
         return cmd_lookup(object_id, host, port);
+    if (strcmp(cmd, "put") == 0)
+        return cmd_put(name, value, conf, host, port);
+    if (strcmp(cmd, "state") == 0)
+        return cmd_state(host, port);
 
     /* Comandos de controle do CP1 (ping/join/leave) exigem host/porta. */
     if (port == 0) {

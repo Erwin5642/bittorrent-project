@@ -824,6 +824,39 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
         send_raw(conn, &msg.header, &sp->self_id, GET_SUCCESSORS, reply, (uint32_t)n);
       }
     }
+  } else if (msg.header.msg_type == GET_STATE) {
+    /* GET_STATE (CP4): texto pronto com o que a hash table guarda, para o
+       `--cmd state` do cliente imprimir como veio. A linha do LogIndex do SMR
+       entra neste texto quando o log existir. */
+    char text[MAX_CONTROL_PAYLOAD_SZ];
+    size_t len = 0;
+    size_t i;
+    int w;
+
+    if (msg.header.pl_size != 0) {
+      send_error(conn, &msg.header, &sp->self_id, 1, "malformed GET_STATE payload");
+    } else {
+      pthread_mutex_lock(&sp->metadata_lock);
+      w = snprintf(text, sizeof text, "Objects: %zu\n", sp->metadata.count);
+      if (w > 0 && (size_t)w < sizeof text) {
+        len = (size_t)w;
+      }
+      for (i = 0; i < METADATA_TABLE_MAX; i++) {
+        const metadata_slot_t *slot = &sp->metadata.slots[i];
+
+        if (!slot->in_use) {
+          continue;
+        }
+        w = snprintf(text + len, sizeof text - len, "%s v%u\n", slot->meta.filename,
+                     (unsigned)slot->meta.version);
+        if (w < 0 || (size_t)w >= sizeof text - len) {
+          break; /* não cabe no teto de controle: corta a lista */
+        }
+        len += (size_t)w;
+      }
+      pthread_mutex_unlock(&sp->metadata_lock);
+      send_raw(conn, &msg.header, &sp->self_id, GET_STATE, (const uint8_t *)text, (uint32_t)len);
+    }
   } else if (msg.header.msg_type == NOTIFY) {
     ack_t ack;
     chord_node_t candidate;

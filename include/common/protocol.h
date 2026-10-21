@@ -80,6 +80,7 @@ enum message_type{
 	GET_SUCCESSORS,  /**< Pede a lista de sucessores. */
 	NOTIFY,          /**< Avisa o sucessor de um nó recém-chegado (payload @c chord_peer_t). */
 	FIND_SUCCESSOR,  /**< Caminho de lookup até o dono de um ObjectID. */
+	GET_STATE,       /**< Estado do Super Peer para o cliente (CP4): pedido vazio, resposta em texto. */
 	MSG_TYPE_MAX,    /**< Sentinela: número de tipos válidos. */
 };
 
