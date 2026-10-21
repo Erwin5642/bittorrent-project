@@ -204,8 +204,19 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
+  smr_log_init(&sp->smr);
+  if (pthread_mutex_init(&sp->smr_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init smr mutex\n");
+    smr_log_shutdown(&sp->smr);
+    pthread_mutex_destroy(&sp->coord_lock);
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
   if (!chord_init(&sp->chord)) {
     fprintf(stderr, "superpeer_init: failed to init chord\n");
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
     pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
@@ -214,6 +225,8 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   if (!chord_create(&sp->chord, &sp->self_id, cfg.ipv4, cfg.port)) {
     fprintf(stderr, "superpeer_init: failed to create chord ring\n");
     chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
     pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
@@ -222,6 +235,8 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   fd = net_listen(cfg.port);
   if (fd < 0) {
     chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
     pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
@@ -355,20 +370,30 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
     return 0;
   }
 
-  if (!metadata_table_put(&sp->metadata, &meta)) {
-    const int full = metadata_table_find_id(&sp->metadata, meta.object_id) == NULL &&
-                     sp->metadata.count >= METADATA_TABLE_MAX;
+  if (!smr_propose_store(sp, &meta)) {
+    int full;
+
+    pthread_mutex_lock(&sp->metadata_lock);
+    full = metadata_table_find_id(&sp->metadata, meta.object_id) == NULL &&
+           sp->metadata.count >= METADATA_TABLE_MAX;
+    pthread_mutex_unlock(&sp->metadata_lock);
     metadata_release(&meta);
     if (full) {
       fill_join_error(err, 6, "metadata table full");
     } else {
-      fill_join_error(err, 1, "malformed STORE payload");
+      fill_join_error(err, 1, "replication failed");
     }
     return 0;
   }
 
-  const file_metadata_t* stored = metadata_table_find_id(&sp->metadata, meta.object_id);
-  metadata_record_print(stored);
+  pthread_mutex_lock(&sp->metadata_lock);
+  {
+    const file_metadata_t *stored = metadata_table_find_id(&sp->metadata, meta.object_id);
+    if (stored) {
+      metadata_record_print(stored);
+    }
+  }
+  pthread_mutex_unlock(&sp->metadata_lock);
   metadata_release(&meta);
   memcpy(ack->node_id, hdr->src_node, NODE_ID_SIZE);
   return 1;
@@ -663,9 +688,7 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
 
     memset(&ack, 0, sizeof ack);
     memset(&err, 0, sizeof err);
-    pthread_mutex_lock(&sp->metadata_lock);
     ok = superpeer_handle_store(sp, &msg.header, in_buf, msg.header.pl_size, &ack, &err);
-    pthread_mutex_unlock(&sp->metadata_lock);
     if (ok) {
       send_ack(conn, &msg.header, &sp->self_id, &ack);
     } else {
@@ -675,6 +698,8 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       send_error(conn, &msg.header, &sp->self_id, err.code,
                  err.reason[0] ? (const char *)err.reason : "STORE rejected");
     }
+  } else if (msg.header.msg_type == LOG_APPEND) {
+    smr_ingest_append(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == LOOKUP) {
     uint8_t reply[METADATA_PAYLOAD_MAX];
     size_t reply_len = 0;
@@ -762,6 +787,7 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
 	node_id_to_hex(&leader, leader_hex, NODE_ID_HEX_SIZE);
 	printf("COORDINATOR %s\n", leader_hex);
 	fflush(stdout);
+	smr_on_coordinator(sp, &leader, node_id_cmp(&leader, &sp->self_id) == 0);
   } else if (msg.header.msg_type == CLOSEST_PRECEDING) {
     node_id_t key;
     chord_node_t step;
@@ -1120,6 +1146,7 @@ static int start_election(superpeer_t *sp) {
 	printf("highest NodeID wins\nCOORDINATOR %s\n", hex);
 	fflush(stdout);
 	broadcast_coordinator(sp);
+	smr_on_coordinator(sp, &sp->self_id, 1);
 	return 1;
 }
 
