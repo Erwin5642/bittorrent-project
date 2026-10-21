@@ -1256,8 +1256,8 @@ static void *heartbeat_worker(void *arg) {
 				node_id_to_hex(&sel_member->id, hex, NODE_ID_HEX_SIZE);
 				printf("SUSPECT %s %s:%d\n", hex, ip, sel_member->port);
 			}
-			/* CP4: coordenador deixou de estar ALIVE -> dispara eleicao. */
-			if(has_coord && node_id_cmp(&sel_member->id, &coord_id) == 0 && sel_member->state != MEMBER_ALIVE){
+			/* CP4: a eleição espera o FAILED que o Gossip confirma. SUSPECT sozinho não dispara. */
+			if(has_coord && node_id_cmp(&sel_member->id, &coord_id) == 0 && sel_member->state == MEMBER_FAILED){
 				coord_lost = 1;
 			}
 			if(send_now && sel_member->node_type == SUPERPEER && sel_member->state != MEMBER_FAILED && sel_member->state != MEMBER_REMOVED){
