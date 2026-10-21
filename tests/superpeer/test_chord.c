@@ -4,6 +4,7 @@
 #include "common/network.h"
 #include "common/protocol.h"
 #include "superpeer/chord.h"
+#include "superpeer/superpeer.h"
 #include "utils/test_utils.h"
 
 #include <string.h>
@@ -317,6 +318,40 @@ static void test_chord_wire(void) {
   }
 }
 
+static void test_gossip_wire(void) {
+  gossip_member_t row;
+  gossip_member_t back[2];
+  uint8_t raw[2u + GOSSIP_ENTRY_WIRE_SIZE];
+  unsigned count = 0;
+  ssize_t bytes;
+  uint16_t port_be;
+
+  memset(&row, 0, sizeof row);
+  row.id[0] = 0xab;
+  row.ipv4 = htonl(0x7f000001);
+  row.port = 5103;
+  row.node_type = SUPERPEER;
+  row.state = MEMBER_SUSPECT;
+  row.last_heartbeat = 0x0102030405060708ull;
+  row.version = 7;
+
+  bytes = gossip_members_pack(&row, 1, raw, sizeof raw);
+  expect(bytes == (ssize_t)(2u + GOSSIP_ENTRY_WIRE_SIZE), "uma linha de gossip");
+  memcpy(&port_be, raw + 2 + NODE_ID_SIZE + 4, 2);
+  expect(ntohs(port_be) == 5103, "porta do gossip em big-endian");
+  expect(gossip_members_unpack(back, 2, &count, raw, (size_t)bytes) == 1, "unpack do gossip");
+  expect(count == 1 && back[0].port == 5103, "porta volta para host order");
+  expect(back[0].state == MEMBER_SUSPECT && back[0].version == 7, "estado e versao");
+  expect(back[0].last_heartbeat == row.last_heartbeat, "heartbeat de 64 bits");
+  expect(back[0].ipv4 == row.ipv4, "IPv4 permanece em network order");
+  expect(gossip_members_pack(&row, GOSSIP_MAX_ENTRIES + 1, raw, sizeof raw) < 0,
+         "digest longo demais falha");
+  expect(gossip_members_unpack(back, 2, &count, raw, 3) == 0, "gossip truncado falha");
+
+  row.state = 9;
+  expect(gossip_members_pack(&row, 1, raw, sizeof raw) < 0, "estado invalido falha");
+}
+
 int main(void) {
   test_add_pow2();
   test_intervals();
@@ -325,5 +360,6 @@ int main(void) {
   test_set_finger();
   test_lookup_step();
   test_chord_wire();
+  test_gossip_wire();
   return test_report();
 }
