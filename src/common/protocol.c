@@ -50,9 +50,9 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[ABORT] = -1,
 	[HEARTBEAT] = 0,
 	[GOSSIP] = -1,
-	[ELECTION] = -1,
-	[OK] = -1,
-	[COORDINATOR] = -1,
+	[ELECTION] = 0,
+	[OK] = 0,
+	[COORDINATOR] = 0,
 	[SNAPSHOT] = -1,
 	[STATE_TRANSFER] = -1,
 	[ACK] = 32,
@@ -776,6 +776,9 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
     case PING:
     case PONG:
     case HEARTBEAT:
+	case OK:
+	case ELECTION:
+	case COORDINATOR:
         break;                      /* sem payload */
     default:
         return -1;
@@ -851,7 +854,10 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case PING:
     case PONG:
     case HEARTBEAT:
-        break;
+    case ELECTION:
+    case OK:
+    case COORDINATOR:
+        break;                      /* sem payload */
     case STORE:
     case LOOKUP:
     case DOWNLOAD_REQ:
@@ -1117,6 +1123,48 @@ int send_heartbeat(int fd, const node_id_t *self) {
 		return NET_ERROR;
 	}
 	if (!fill_origin_header(&hdr, self, HEARTBEAT, 0)) {
+		return NET_ERROR;
+	}
+	return send_message(fd, buf, sizeof buf, NULL, &hdr);
+}
+
+/* Atalho: envia ELECTION como mensagem de origem (TransactionID novo), sem payload. */
+int send_election(int fd, const node_id_t *self) {
+	uint8_t buf[HEADER_SIZE];
+	pl_header hdr;
+
+	if (!self) {
+		return NET_ERROR;
+	}
+	if (!fill_origin_header(&hdr, self, ELECTION, 0)) {
+		return NET_ERROR;
+	}
+	return send_message(fd, buf, sizeof buf, NULL, &hdr);
+}
+
+/* Atalho: envia OK (resposta a um ELECTION de nó inferior), sem payload. */
+int send_ok(int fd, const node_id_t *self) {
+	uint8_t buf[HEADER_SIZE];
+	pl_header hdr;
+
+	if (!self) {
+		return NET_ERROR;
+	}
+	if (!fill_origin_header(&hdr, self, OK, 0)) {
+		return NET_ERROR;
+	}
+	return send_message(fd, buf, sizeof buf, NULL, &hdr);
+}
+
+/* Atalho: anuncia COORDINATOR (novo líder eleito) como mensagem de origem, sem payload. */
+int send_coordinator(int fd, const node_id_t *self) {
+	uint8_t buf[HEADER_SIZE];
+	pl_header hdr;
+
+	if (!self) {
+		return NET_ERROR;
+	}
+	if (!fill_origin_header(&hdr, self, COORDINATOR, 0)) {
 		return NET_ERROR;
 	}
 	return send_message(fd, buf, sizeof buf, NULL, &hdr);

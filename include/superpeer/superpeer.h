@@ -29,6 +29,15 @@
 /** Silêncio a partir do qual um membro ALIVE é rebaixado para SUSPECT, em segundos. */
 #define HEARTBEAT_TIMEOUT_SEC 15
 
+/** Teto, em segundos, da RPC ELECTION/OK por nó superior durante a eleição Bully (CP4). */
+#define ELECTION_TIMEOUT_SEC 1
+
+/** Tempo que um CANDIDATE que recebeu OK espera por um COORDINATOR antes de reiniciar a eleição (CP4), em segundos. */
+#define COORDINATOR_WAIT_SEC 15
+
+/** Espera inicial antes da primeira eleição no boot (CP4), para a membership povoar, em segundos. */
+#define ELECTION_BOOT_GRACE_SEC 5
+
 /**
  * @brief Estado de um membro na tabela local.
  */
@@ -38,6 +47,15 @@ typedef enum {
   MEMBER_FAILED,  /**< Reservado (Gossip/Election, CP4). */
   MEMBER_REMOVED  /**< Saiu via LEAVE; não é mais alvo de heartbeat. */
 } member_state_t;
+
+/**
+ * @brief Papel deste Super Peer na eleição Bully (CP4).
+ */
+typedef enum {
+  COORD_FOLLOWER,  /**< Segue um coordenador conhecido, ou ainda não há nenhum. */
+  COORD_CANDIDATE, /**< Eleição em andamento iniciada por este nó. */
+  COORD_LEADER     /**< Este nó é o coordenador eleito. */
+} coord_role_t;
 
 /**
  * @brief Entrada da tabela de membros.
@@ -71,6 +89,11 @@ typedef struct {
   chord_t chord;                     /**< Anel local. Começa com o sucessor igual a este nó. */
   int listend_fd;                    /**< fd de `net_listen`, ou -1. */
   char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
+  node_id_t coordinator_id;          /**< NodeID de quem este nó considera coordenador (CP4). */
+  int has_coordinator;               /**< 1 se @c coordinator_id é válido. */
+  coord_role_t coord_role;           /**< Papel deste nó na eleição Bully. */
+  int election_needed;               /**< 1 pede que a thread de eleição rode uma eleição (CP4). */
+  pthread_mutex_t coord_lock;        /**< Serializa os campos de coordenação acima. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
   pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
 } superpeer_t;
