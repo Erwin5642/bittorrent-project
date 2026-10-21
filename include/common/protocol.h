@@ -81,6 +81,7 @@ enum message_type{
 	NOTIFY,          /**< Avisa o sucessor de um nó recém-chegado (payload @c chord_peer_t). */
 	FIND_SUCCESSOR,  /**< Caminho de lookup até o dono de um ObjectID. */
 	LOG_APPEND,      /**< Uma entrada do operation log (CP4, payload variável). */
+	GET_STATE,       /**< Estado do Super Peer para o cliente (CP4): pedido vazio, resposta em texto. */
 	MSG_TYPE_MAX,    /**< Sentinela: número de tipos válidos. */
 };
 

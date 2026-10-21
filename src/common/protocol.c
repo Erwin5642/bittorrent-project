@@ -63,6 +63,7 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[NOTIFY] = CHORD_NODE_WIRE_SIZE,
 	[FIND_SUCCESSOR] = -1,
 	[LOG_APPEND] = -1,
+	[GET_STATE] = -1,
 };
 
 /* Tamanho do payload de um tipo, ou -1 se fora de faixa ou ainda sem layout. */
@@ -89,6 +90,7 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [NOTIFY] = "NOTIFY",
     [FIND_SUCCESSOR] = "FIND_SUCCESSOR",
     [LOG_APPEND] = "LOG_APPEND",
+    [GET_STATE] = "GET_STATE",
 };
 
 /* STORE/LOOKUP/DOWNLOAD_* e LOG_APPEND carregam bytes crus e podem passar do teto de controle. */
@@ -1015,6 +1017,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case GET_PREDECESSOR:
     case GET_SUCCESSORS:
     case FIND_SUCCESSOR:
+    case GET_STATE:
         break;   /* payload cru; o handler desserializa */
     default:
         return NET_ERROR;
