@@ -260,6 +260,39 @@ static void test_null_and_missing_file(void) {
 /**
  * @brief Executa a suíte de config e devolve o código de test_report.
  */
+/**
+ * @brief A coluna `prioridade` de cada Super Peer chega com IP e porta (CP4).
+ */
+static void test_roster_priorities(void) {
+  node_priority_t prio[CONFIG_ROSTER_MAX];
+  node_priority_t tiny[2];
+  size_t count = 99;
+
+  expect(write_temp_conf(ROSTER), "escreve roster");
+  expect(node_roster_priorities(TEST_CONF_PATH, prio, CONFIG_ROSTER_MAX, &count) == 1,
+         "prioridades carregam");
+  expect(count == 3, "tres superpeers");
+  expect(prio[0].port == 5101 && prio[0].priority == 1, "SP1 prioridade 1");
+  expect(prio[2].port == 5103 && prio[2].priority == 3, "SP3 prioridade 3");
+  expect(prio[1].ipv4 == ipv4_from_str("127.0.0.1"), "ip em network byte order");
+  expect(node_roster_priorities(TEST_CONF_PATH, tiny, 2, &count) == 0, "capacidade curta falha");
+  unlink(TEST_CONF_PATH);
+
+  expect(write_temp_conf("P1,peer,127.0.0.1,6001,0000000a,9\n"
+                         "SP1,superpeer,127.0.0.1,5101,00000001,4\n"),
+         "roster com peer");
+  expect(node_roster_priorities(TEST_CONF_PATH, prio, CONFIG_ROSTER_MAX, &count) == 1 &&
+             count == 1 && prio[0].priority == 4,
+         "linha peer fica de fora");
+  unlink(TEST_CONF_PATH);
+
+  expect(write_temp_conf("SP1,superpeer,127.0.0.1,5101,00000001,x\n"), "prioridade invalida");
+  expect(node_roster_priorities(TEST_CONF_PATH, prio, CONFIG_ROSTER_MAX, &count) == 0,
+         "prioridade nao numerica falha");
+  unlink(TEST_CONF_PATH);
+  expect(node_roster_priorities(NULL, prio, CONFIG_ROSTER_MAX, &count) == 0, "path NULL falha");
+}
+
 int main(void) {
   test_load_superpeer_with_bootstrap();
   test_load_peer_without_bootstrap();
@@ -270,5 +303,6 @@ int main(void) {
   test_null_and_missing_file();
   test_roster_bootstrap();
   test_roster_rejects();
+  test_roster_priorities();
   return test_report();
 }

@@ -203,7 +203,8 @@ int node_config_load(const char *path, node_config_t *out) {
   return seen_ip && seen_port && seen_type;
 }
 
-static int parse_priority(const char *s) {
+/* Valida a coluna `prioridade`; com @p out != NULL devolve o valor. */
+static int parse_priority(const char *s, uint32_t *out) {
   char *end;
   unsigned long value;
 
@@ -214,6 +215,9 @@ static int parse_priority(const char *s) {
   value = strtoul(s, &end, 10);
   if (errno != 0 || end == s || *end != '\0' || value > 4294967295UL) {
     return 0;
+  }
+  if (out) {
+    *out = (uint32_t)value;
   }
   return 1;
 }
@@ -252,6 +256,71 @@ static int split_roster_fields(char *line, char *fields[6]) {
     return 0;
   }
   fields[5] = trim(cursor);
+  return 1;
+}
+
+int node_roster_priorities(const char *path, node_priority_t *out, size_t cap, size_t *count) {
+  FILE *fp;
+  char line[CONFIG_LINE_MAX];
+  size_t n_out = 0;
+
+  if (!path || !out || !count) {
+    return 0;
+  }
+  *count = 0;
+
+  fp = fopen(path, "r");
+  if (!fp) {
+    return 0;
+  }
+
+  while (fgets(line, sizeof line, fp)) {
+    char *fields[6];
+    char *text;
+    node_type_t type;
+    uint32_t ipv4;
+    uint16_t port;
+    uint32_t priority;
+    size_t n = strlen(line);
+
+    if (n == sizeof(line) - 1 && line[n - 1] != '\n') {
+      fclose(fp);
+      return 0;
+    }
+    if (n > 0 && line[n - 1] == '\n') {
+      line[n - 1] = '\0';
+      n--;
+    }
+    if (n > 0 && line[n - 1] == '\r') {
+      line[n - 1] = '\0';
+    }
+
+    text = trim(line);
+    if (*text == '\0' || *text == '#') {
+      continue;
+    }
+    if (!split_roster_fields(text, fields) || fields[0][0] == '\0' ||
+        !parse_type(fields[1], &type) || !parse_ipv4(fields[2], &ipv4) ||
+        !parse_port(fields[3], &port) || !parse_roster_id(fields[4]) ||
+        !parse_priority(fields[5], &priority)) {
+      fclose(fp);
+      return 0;
+    }
+    if (type != SUPERPEER) {
+      continue;
+    }
+    if (n_out >= cap) {
+      fclose(fp);
+      return 0;
+    }
+    out[n_out].ipv4 = ipv4;
+    out[n_out].port = port;
+    out[n_out].priority = priority;
+    n_out++;
+  }
+
+  fclose(fp);
+  *count = n_out;
   return 1;
 }
 
@@ -306,7 +375,7 @@ int node_roster_load(const char *path, uint16_t self_port, node_config_t *out, c
       return 0;
     }
     if (fields[0][0] == '\0' || !parse_type(fields[1], &type) || !parse_ipv4(fields[2], &ipv4) ||
-        !parse_port(fields[3], &port) || !parse_roster_id(fields[4]) || !parse_priority(fields[5])) {
+        !parse_port(fields[3], &port) || !parse_roster_id(fields[4]) || !parse_priority(fields[5], NULL)) {
       fclose(fp);
       return 0;
     }

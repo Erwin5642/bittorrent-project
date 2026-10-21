@@ -93,6 +93,8 @@ typedef struct {
   int has_coordinator;               /**< 1 se @c coordinator_id é válido. */
   coord_role_t coord_role;           /**< Papel deste nó na eleição Bully. */
   int election_needed;               /**< 1 pede que a thread de eleição rode uma eleição (CP4). */
+  node_priority_t roster[CONFIG_ROSTER_MAX]; /**< Prioridade Bully de cada Super Peer do roster (CP4). */
+  size_t roster_count;               /**< Entradas válidas em @c roster; 0 sem roster (C1/C2). */
   pthread_mutex_t coord_lock;        /**< Serializa os campos de coordenação acima. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
   pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
