@@ -62,6 +62,7 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[GET_SUCCESSORS] = -1,
 	[NOTIFY] = CHORD_NODE_WIRE_SIZE,
 	[FIND_SUCCESSOR] = -1,
+	[LOG_APPEND] = -1,
 	[GET_STATE] = -1,
 };
 
@@ -88,12 +89,14 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [GET_SUCCESSORS] = "GET_SUCCESSORS",
     [NOTIFY] = "NOTIFY",
     [FIND_SUCCESSOR] = "FIND_SUCCESSOR",
+    [LOG_APPEND] = "LOG_APPEND",
     [GET_STATE] = "GET_STATE",
 };
 
-/* STORE/LOOKUP/DOWNLOAD_* carregam bytes crus e podem passar do teto de controle. */
+/* STORE/LOOKUP/DOWNLOAD_* e LOG_APPEND carregam bytes crus e podem passar do teto de controle. */
 static int payload_is_data(uint16_t t) {
-	return t == STORE || t == LOOKUP || t == DOWNLOAD_REQ || t == DOWNLOAD_REP;
+	return t == STORE || t == LOOKUP || t == DOWNLOAD_REQ || t == DOWNLOAD_REP ||
+	       t == LOG_APPEND;
 }
 
 static uint32_t payload_ceiling(uint16_t t) {
@@ -390,6 +393,151 @@ int metadata_unpack(file_metadata_t *out, const uint8_t *in, size_t in_len) {
 		if (!tmp.chunk_hashes)
 			return 0;
 		memcpy(tmp.chunk_hashes, pt, tail);
+	}
+
+	*out = tmp;
+	return 1;
+}
+
+/* SHA-256 do comando com o campo checksum zerado. O ponteiro de hashes e compartilhado. */
+static int log_append_digest(const smr_entry_t *entry, uint8_t out[SMR_CHECKSUM_SIZE]) {
+	smr_entry_t tmp;
+	uint8_t *buf;
+	ssize_t n;
+
+	tmp = *entry;
+	memset(tmp.checksum, 0, SMR_CHECKSUM_SIZE);
+	buf = malloc((size_t)LOG_APPEND_PREFIX + METADATA_PAYLOAD_MAX);
+	if (!buf)
+		return 0;
+	n = log_append_pack(&tmp, buf, (size_t)LOG_APPEND_PREFIX + METADATA_PAYLOAD_MAX);
+	if (n < 0 || !sha256(buf, (size_t)n, out)) {
+		free(buf);
+		return 0;
+	}
+	free(buf);
+	return 1;
+}
+
+/*
+ * Prefixo LOG_APPEND_PREFIX e, se STORE/UPDATE, o metadata_pack em seguida.
+ * O checksum vai como esta; quem sela zera o campo antes de chamar o digest.
+ */
+ssize_t log_append_pack(const smr_entry_t *entry, uint8_t *out, size_t out_cap) {
+	uint8_t *pt;
+	uint64_t temp_64;
+	uint32_t temp_32;
+	uint32_t stored_len = 0;
+	ssize_t stored_n = 0;
+
+	if (!entry || !out || out_cap < LOG_APPEND_PREFIX)
+		return -1;
+	if (entry->operation < SMR_OP_STORE || entry->operation > SMR_OP_PUT)
+		return -1;
+	if (metadata_id_is_zero(entry->object_id) || !metadata_name_ok(entry->name))
+		return -1;
+
+	if (entry->operation == SMR_OP_STORE || entry->operation == SMR_OP_UPDATE) {
+		stored_n = metadata_pack(&entry->stored, out + LOG_APPEND_PREFIX, out_cap - LOG_APPEND_PREFIX);
+		if (stored_n < 0)
+			return -1;
+		stored_len = (uint32_t)stored_n;
+	}
+
+	pt = out;
+	*pt++ = (uint8_t)entry->operation;
+
+	temp_64 = my_ntohll(entry->log_index);
+	memcpy(pt, &temp_64, sizeof temp_64);
+	pt += sizeof temp_64;
+
+	memcpy(pt, entry->transaction_id, SMR_TRSC_ID_SIZE);
+	pt += SMR_TRSC_ID_SIZE;
+
+	memcpy(pt, entry->object_id, METADATA_OBJECT_ID_SIZE);
+	pt += METADATA_OBJECT_ID_SIZE;
+
+	temp_64 = my_ntohll(entry->timestamp);
+	memcpy(pt, &temp_64, sizeof temp_64);
+	pt += sizeof temp_64;
+
+	temp_32 = htonl(entry->version);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	pt += sizeof temp_32;
+
+	memcpy(pt, entry->checksum, SMR_CHECKSUM_SIZE);
+	pt += SMR_CHECKSUM_SIZE;
+
+	memcpy(pt, entry->name, METADATA_FILENAME_MAX);
+	pt += METADATA_FILENAME_MAX;
+
+	temp_32 = htonl(stored_len);
+	memcpy(pt, &temp_32, sizeof temp_32);
+	return (ssize_t)LOG_APPEND_PREFIX + (ssize_t)stored_len;
+}
+
+/* Inverso de log_append_pack. Checksum divergente libera o bloco e devolve 0. */
+int log_append_unpack(smr_entry_t *out, const uint8_t *in, size_t in_len) {
+	smr_entry_t tmp;
+	const uint8_t *pt;
+	uint64_t temp_64;
+	uint32_t temp_32;
+	uint32_t stored_len;
+	uint8_t digest[SMR_CHECKSUM_SIZE];
+
+	if (!out || !in || in_len < LOG_APPEND_PREFIX)
+		return 0;
+
+	memset(&tmp, 0, sizeof tmp);
+	pt = in;
+	tmp.operation = (smr_op_t)(*pt++);
+	if (tmp.operation < SMR_OP_STORE || tmp.operation > SMR_OP_PUT)
+		return 0;
+
+	memcpy(&temp_64, pt, sizeof temp_64);
+	tmp.log_index = my_ntohll(temp_64);
+	pt += sizeof temp_64;
+
+	memcpy(tmp.transaction_id, pt, SMR_TRSC_ID_SIZE);
+	pt += SMR_TRSC_ID_SIZE;
+
+	memcpy(tmp.object_id, pt, METADATA_OBJECT_ID_SIZE);
+	pt += METADATA_OBJECT_ID_SIZE;
+
+	memcpy(&temp_64, pt, sizeof temp_64);
+	tmp.timestamp = my_ntohll(temp_64);
+	pt += sizeof temp_64;
+
+	memcpy(&temp_32, pt, sizeof temp_32);
+	tmp.version = ntohl(temp_32);
+	pt += sizeof temp_32;
+
+	memcpy(tmp.checksum, pt, SMR_CHECKSUM_SIZE);
+	pt += SMR_CHECKSUM_SIZE;
+
+	memcpy(tmp.name, pt, METADATA_FILENAME_MAX);
+	pt += METADATA_FILENAME_MAX;
+
+	memcpy(&temp_32, pt, sizeof temp_32);
+	stored_len = ntohl(temp_32);
+	pt += sizeof temp_32;
+
+	if (metadata_id_is_zero(tmp.object_id) || !metadata_name_ok(tmp.name))
+		return 0;
+	if (stored_len > METADATA_PAYLOAD_MAX || in_len != (size_t)LOG_APPEND_PREFIX + stored_len)
+		return 0;
+
+	if (tmp.operation == SMR_OP_STORE || tmp.operation == SMR_OP_UPDATE) {
+		if (!metadata_unpack(&tmp.stored, pt, stored_len))
+			return 0;
+	} else if (stored_len != 0) {
+		return 0;
+	}
+
+	if (!log_append_digest(&tmp, digest) ||
+	    memcmp(digest, tmp.checksum, SMR_CHECKSUM_SIZE) != 0) {
+		metadata_release(&tmp.stored);
+		return 0;
 	}
 
 	*out = tmp;
@@ -864,6 +1012,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case LOOKUP:
     case DOWNLOAD_REQ:
     case DOWNLOAD_REP:
+    case LOG_APPEND:
     case CLOSEST_PRECEDING:
     case GET_PREDECESSOR:
     case GET_SUCCESSORS:
@@ -895,9 +1044,10 @@ int send_message(const int fd, uint8_t *out_msg_buffer, const size_t buf_size,
  * Le o header, valida versao/tipo/pl_size, le o payload, confere o CRC32 e
  * desserializa para struct_payload. Devolve msg_t com header, payload e status.
  *
- * STORE/LOOKUP/DOWNLOAD_* sao lidos por inteiro (ate MAX_DATA_PAYLOAD_SZ) e
- * devolvidos crus em in_msg_buffer. GOSSIP, STATE_TRANSFER e SNAPSHOT continuam
- * sem leitura do corpo: o layout deles pertence aos checkpoints seguintes.
+ * STORE/LOOKUP/DOWNLOAD_* e LOG_APPEND sao lidos por inteiro (ate
+ * MAX_DATA_PAYLOAD_SZ) e devolvidos crus em in_msg_buffer. GOSSIP,
+ * STATE_TRANSFER e SNAPSHOT continuam sem leitura do corpo: o layout deles
+ * pertence aos checkpoints seguintes.
  */
 msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
                    void *struct_payload, size_t struct_size){

@@ -6,6 +6,7 @@
 #include "common/protocol.h"
 #include "superpeer/chord.h"
 #include "superpeer/metadata.h"
+#include "superpeer/smr.h"
 
 #include <pthread.h>
 #include <stddef.h>
@@ -14,7 +15,7 @@
 
 /**
  * @file superpeer.h
- * @brief Processo Super Peer: membership local, índice de metadata e ciclo de JOIN.
+ * @brief Processo Super Peer: membership local, índice de metadata, anel, eleição e log SMR.
  */
 
 /** Capacidade da tabela de membros em memória (sem persistência). */
@@ -81,21 +82,25 @@ typedef struct {
 /**
  * @brief Estado do processo Super Peer.
  */
-typedef struct {
+typedef struct superpeer {
   node_config_t cfg;                 /**< Configuração lida do .conf. */
   node_id_t self_id;                 /**< NodeID deste Super Peer. */
   member_table_t members;            /**< Membership local. */
   metadata_table_t metadata;         /**< Índice local por ObjectID. */
   chord_t chord;                     /**< Anel local. Começa com o sucessor igual a este nó. */
+  smr_log_t smr;                     /**< Operation log. @c smr_log_init na subida. */
   int listend_fd;                    /**< fd de `net_listen`, ou -1. */
   char name[SUPERPEER_NAME_MAX];     /**< Nome lógico (`--name`), para logs do harness. */
   node_id_t coordinator_id;          /**< NodeID de quem este nó considera coordenador (CP4). */
   int has_coordinator;               /**< 1 se @c coordinator_id é válido. */
   coord_role_t coord_role;           /**< Papel deste nó na eleição Bully. */
   int election_needed;               /**< 1 pede que a thread de eleição rode uma eleição (CP4). */
+  node_priority_t roster[CONFIG_ROSTER_MAX]; /**< Prioridade Bully de cada Super Peer do roster (CP4). */
+  size_t roster_count;               /**< Entradas válidas em @c roster; 0 sem roster (C1/C2). */
   pthread_mutex_t coord_lock;        /**< Serializa os campos de coordenação acima. */
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
   pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
+  pthread_mutex_t smr_lock;          /**< Serializa o log. Não segurar durante connect ou send. */
 } superpeer_t;
 
 /**

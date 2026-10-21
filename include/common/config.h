@@ -48,6 +48,30 @@ typedef struct {
  */
 int node_config_load(const char *path, node_config_t *out);
 
+/** Teto de linhas `superpeer` lidas por @c node_roster_priorities. */
+#define CONFIG_ROSTER_MAX 64
+
+/**
+ * @brief Prioridade de um Super Peer no roster, pela coluna `prioridade` (CP4).
+ */
+typedef struct {
+  uint32_t ipv4;     /**< IPv4, network byte order. */
+  uint16_t port;     /**< Porta TCP, host byte order. */
+  uint32_t priority; /**< Coluna `prioridade`; maior vence a eleição Bully. */
+} node_priority_t;
+
+/**
+ * @brief Lê a coluna `prioridade` de todas as linhas `superpeer` do roster.
+ *
+ * Mesma validação de @c node_roster_load. Linhas `peer` ficam de fora.
+ * @param path Caminho do roster.
+ * @param out Destino; o caller aloca @p cap entradas.
+ * @param cap Capacidade de @p out. Mais linhas `superpeer` que isso falha.
+ * @param count Quantidade de entradas preenchidas.
+ * @return 1 em sucesso, 0 se o arquivo ou alguma linha for inválida.
+ */
+int node_roster_priorities(const char *path, node_priority_t *out, size_t cap, size_t *count);
+
 /**
  * @brief Carrega a linha do próprio nó num roster CSV.
  *
