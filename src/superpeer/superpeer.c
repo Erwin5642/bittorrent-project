@@ -908,6 +908,20 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       send_error(conn, &msg.header, &sp->self_id, err.code,
                  err.reason[0] ? (const char *)err.reason : "STORE rejected");
     }
+  } else if (msg.header.msg_type == PUT) {
+    char name[METADATA_FILENAME_MAX];
+    const uint8_t *value = NULL;
+    size_t value_len = 0;
+    ack_t ack;
+
+    memset(&ack, 0, sizeof ack);
+    if (!put_request_unpack(name, sizeof name, &value, &value_len, in_buf, msg.header.pl_size) ||
+        !smr_propose_put(sp, name, value, value_len)) {
+      send_error(conn, &msg.header, &sp->self_id, 1, "PUT rejected");
+    } else {
+      memcpy(ack.node_id, sp->self_id.bytes, NODE_ID_SIZE);
+      send_ack(conn, &msg.header, &sp->self_id, &ack);
+    }
   } else if (msg.header.msg_type == LOG_APPEND) {
     smr_ingest_append(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == LOOKUP) {
@@ -1101,9 +1115,8 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       }
     }
   } else if (msg.header.msg_type == GET_STATE) {
-    /* GET_STATE (CP4): texto pronto com o que a hash table guarda, para o
-       `--cmd state` do cliente imprimir como veio. A linha do LogIndex do SMR
-       entra neste texto quando o log existir. */
+    /* GET_STATE (CP4): texto pronto para o `--cmd state`. LogIndex é o
+       último índice aplicado; em seguida vêm os nomes da hash table. */
     char text[MAX_CONTROL_PAYLOAD_SZ];
     size_t len = 0;
     size_t i;
@@ -1113,7 +1126,9 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       send_error(conn, &msg.header, &sp->self_id, 1, "malformed GET_STATE payload");
     } else {
       pthread_mutex_lock(&sp->metadata_lock);
-      w = snprintf(text, sizeof text, "Objects: %zu\n", sp->metadata.count);
+      pthread_mutex_lock(&sp->smr_lock);
+      w = snprintf(text, sizeof text, "LogIndex %llu\nObjects: %zu\n",
+                   (unsigned long long)sp->smr.last_applied, sp->metadata.count);
       if (w > 0 && (size_t)w < sizeof text) {
         len = (size_t)w;
       }
@@ -1130,6 +1145,7 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
         }
         len += (size_t)w;
       }
+      pthread_mutex_unlock(&sp->smr_lock);
       pthread_mutex_unlock(&sp->metadata_lock);
       send_raw(conn, &msg.header, &sp->self_id, GET_STATE, (const uint8_t *)text, (uint32_t)len);
     }

@@ -145,9 +145,31 @@ done:
     net_close(sv[1]);
 }
 
+static void test_put_request_round_trip(void) {
+  const uint8_t value[] = "value1";
+  uint8_t raw[64];
+  char name[METADATA_FILENAME_MAX];
+  const uint8_t *got = NULL;
+  size_t got_len = 0;
+  ssize_t n;
+
+  n = put_request_pack("c4-file", value, 6, raw, sizeof raw);
+  expect(n == 2 + 7 + 4 + 6, "PUT cabe no prefixo");
+  if (n > 0 && put_request_unpack(name, sizeof name, &got, &got_len, raw, (size_t)n) == 1) {
+    expect(strcmp(name, "c4-file") == 0 && got_len == 6 && got && memcmp(got, value, 6) == 0,
+           "nome e valor");
+    raw[0] ^= 0x01;
+    expect(put_request_unpack(name, sizeof name, &got, &got_len, raw, (size_t)n) == 0,
+           "nome corrompido falha");
+  } else {
+    expect(0, "unpack do PUT");
+  }
+}
+
 int main(void) {
   test_lookup_round_trip();
   test_download_req_round_trip();
   test_large_frame_then_ping();
+  test_put_request_round_trip();
   return test_report();
 }
