@@ -135,6 +135,12 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     fprintf(stderr, "superpeer_init: type must be superpeer\n");
     return 0;
   }
+  /* Roster (CP4): a coluna `prioridade` decide a eleição Bully. Sem roster
+     (C1/C2), a tabela fica vazia e a eleição cai no NodeID. */
+  if (roster_name[0] &&
+      !node_roster_priorities(conf_path, sp->roster, CONFIG_ROSTER_MAX, &sp->roster_count)) {
+    sp->roster_count = 0;
+  }
 
   if (port != 0) {
     cfg.port = port;
@@ -975,7 +981,30 @@ static void set_recv_timeout(int fd, int seconds) {
 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 }
 
-/* RPC de eleicao: envia ELECTION a um no de NodeID maior e espera o OK no mesmo
+/* Prioridade Bully (CP4): coluna `prioridade` do roster, achada por IP+porta.
+   Fora do roster (ou sem roster, C1/C2) vale 0. */
+static uint32_t roster_priority(const superpeer_t *sp, uint32_t ipv4, uint16_t port) {
+	for (size_t i = 0; i < sp->roster_count; i++) {
+		if (sp->roster[i].ipv4 == ipv4 && sp->roster[i].port == port) {
+			return sp->roster[i].priority;
+		}
+	}
+	return 0;
+}
+
+/* Ordem da eleicao: 1 se @p m vence este no. A prioridade do roster decide e o
+   NodeID so desempata, entao sem roster tudo segue pelo NodeID. */
+static int outranks_self(const superpeer_t *sp, const member_t *m) {
+	uint32_t pm = roster_priority(sp, m->ipv4, m->port);
+	uint32_t ps = roster_priority(sp, sp->cfg.ipv4, sp->cfg.port);
+
+	if (pm != ps) {
+		return pm > ps;
+	}
+	return node_id_cmp(&m->id, &sp->self_id) > 0;
+}
+
+/* RPC de eleicao: envia ELECTION a um no de prioridade maior e espera o OK no mesmo
    socket. Retorna 1 se um OK chegou (ha no superior vivo), 0 caso contrario
    (conexao recusada, timeout ou erro). E a propria RPC que testa a vida do no. */
 static int election_contact(superpeer_t *sp, const member_t *higher) {
@@ -1035,7 +1064,7 @@ static void broadcast_coordinator(superpeer_t *sp) {
 	}
 }
 
-/* Uma rodada de eleicao Bully. Contata os Super Peers de NodeID maior; se algum
+/* Uma rodada de eleicao Bully. Contata os Super Peers de prioridade maior; se algum
    responde OK, cede e espera o anuncio COORDINATOR (retorna 0). Se nenhum responde,
    este no vence: vira COORD_LEADER, grava a si como coordenador e anuncia (retorna 1). */
 static int start_election(superpeer_t *sp) {
@@ -1052,14 +1081,14 @@ static int start_election(superpeer_t *sp) {
 	printf("ELECTION started by %s\n", hex);
 	fflush(stdout);
 
-	/* Snapshot dos nos de maior prioridade (NodeID maior). Inclui ALIVE e SUSPECT:
+	/* Snapshot dos nos de maior prioridade (outranks_self). Inclui ALIVE e SUSPECT:
 	   a RPC em si e o teste de vida; so FAILED/REMOVED ficam de fora. */
 	pthread_mutex_lock(&sp->members_lock);
 	for (size_t i = 0; i < sp->members.count; i++) {
 		member_t *m = &sp->members.entries[i];
 
 		if (m->node_type == SUPERPEER && m->state != MEMBER_FAILED && m->state != MEMBER_REMOVED &&
-		    node_id_cmp(&m->id, &sp->self_id) > 0) {
+		    outranks_self(sp, m)) {
 			higher[higher_count++] = *m;
 		}
 	}
