@@ -64,6 +64,7 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[FIND_SUCCESSOR] = -1,
 	[LOG_APPEND] = -1,
 	[GET_STATE] = -1,
+	[PUT] = -1,
 };
 
 /* Tamanho do payload de um tipo, ou -1 se fora de faixa ou ainda sem layout. */
@@ -91,6 +92,7 @@ static const char *const type_names[MSG_TYPE_MAX] = {
     [FIND_SUCCESSOR] = "FIND_SUCCESSOR",
     [LOG_APPEND] = "LOG_APPEND",
     [GET_STATE] = "GET_STATE",
+    [PUT] = "PUT",
 };
 
 /* STORE/LOOKUP/DOWNLOAD_* e LOG_APPEND carregam bytes crus e podem passar do teto de controle. */
@@ -541,6 +543,56 @@ int log_append_unpack(smr_entry_t *out, const uint8_t *in, size_t in_len) {
 	}
 
 	*out = tmp;
+	return 1;
+}
+
+/* PUT do cliente: uint16 name_len, nome, uint32 value_len, valor. Big-endian. */
+ssize_t put_request_pack(const char *name, const uint8_t *value, size_t value_len,
+                         uint8_t *out, size_t out_cap) {
+	size_t name_len;
+	size_t total;
+	uint16_t name_be;
+	uint32_t value_be;
+
+	if (!metadata_name_ok(name) || !out || (value_len > 0 && !value))
+		return -1;
+	name_len = strlen(name);
+	if (name_len > UINT16_MAX || value_len > UINT32_MAX)
+		return -1;
+	total = 2u + name_len + 4u + value_len;
+	if (total > out_cap || total > MAX_CONTROL_PAYLOAD_SZ)
+		return -1;
+	name_be = htons((uint16_t)name_len);
+	value_be = htonl((uint32_t)value_len);
+	memcpy(out, &name_be, 2);
+	memcpy(out + 2, name, name_len);
+	memcpy(out + 2 + name_len, &value_be, 4);
+	if (value_len > 0)
+		memcpy(out + 6 + name_len, value, value_len);
+	return (ssize_t)total;
+}
+
+int put_request_unpack(char *name, size_t name_cap, const uint8_t **value, size_t *value_len,
+                       const uint8_t *in, size_t in_len) {
+	uint16_t name_n;
+	uint32_t value_n;
+
+	if (!name || name_cap < 2 || !value || !value_len || !in || in_len < 6)
+		return 0;
+	memcpy(&name_n, in, 2);
+	name_n = ntohs(name_n);
+	if (name_n == 0 || (size_t)name_n >= name_cap || in_len < (size_t)6 + name_n)
+		return 0;
+	memcpy(&value_n, in + 2 + name_n, 4);
+	value_n = ntohl(value_n);
+	if (in_len != (size_t)6 + name_n + value_n)
+		return 0;
+	memcpy(name, in + 2, name_n);
+	name[name_n] = '\0';
+	if (!metadata_name_ok(name))
+		return 0;
+	*value_len = value_n;
+	*value = value_n > 0 ? in + 6 + name_n : NULL;
 	return 1;
 }
 
@@ -1018,6 +1070,7 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case GET_SUCCESSORS:
     case FIND_SUCCESSOR:
     case GET_STATE:
+    case PUT:
         break;   /* payload cru; o handler desserializa */
     default:
         return NET_ERROR;

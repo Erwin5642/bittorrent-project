@@ -232,20 +232,26 @@ static int cmd_download(const char *name, const char *output, const char *conf,
 }
 
 /* Subcomando (CP4): --cmd put --name <nome> --value <valor>
- * PUT é STORE: o registro vai sem chunks, com ObjectID = SHA-256(nome || valor)
- * e size = tamanho do valor. Sai 0 só com o ACK do Super Peer. */
+ * Manda PUT. O Super Peer sela a operação PUT; o valor só entra no ObjectID
+ * SHA-256(nome || valor). Sai 0 só com o ACK. */
 static int cmd_put(const char *name, const char *value, const char *conf,
                    const char *host_opt, long port_opt) {
 	peer_t self;
 	node_config_t cfg;
-	file_metadata_t meta;
 	node_id_t oid;
+	pl_header hdr;
+	msg_t reply;
 	char host[INET_ADDRSTRLEN];
 	char hex[NODE_ID_HEX_SIZE];
-	uint16_t port = 0;
+	uint8_t payload[MAX_CONTROL_PAYLOAD_SZ];
+	uint8_t frame[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+	uint8_t reply_buf[MAX_CONTROL_PAYLOAD_SZ];
 	uint8_t *concat;
+	uint16_t port = 0;
 	size_t name_len;
 	size_t value_len;
+	ssize_t packed;
+	int fd;
 	int ok;
 
 	if (!name || !value) {
@@ -264,29 +270,49 @@ static int cmd_put(const char *name, const char *value, const char *conf,
 		return 1;
 	}
 
-	metadata_init(&meta);
-	concat = malloc(name_len + value_len + 1);
+	concat = malloc(name_len + value_len);
 	if (!concat)
 		return 1;
 	memcpy(concat, name, name_len);
-	memcpy(concat + name_len, value, value_len);
-	ok = sha256(concat, name_len + value_len, meta.object_id);
+	if (value_len > 0)
+		memcpy(concat + name_len, value, value_len);
+	ok = sha256(concat, name_len + value_len, oid.bytes);
 	free(concat);
 	if (!ok) {
 		fprintf(stderr, "put: falha ao calcular o ObjectID\n");
 		return 1;
 	}
-	memcpy(meta.filename, name, name_len + 1);
-	meta.size = (uint64_t)value_len;
-	meta.chunk_count = 0;
-	meta.version = 1;
-	meta.owner = self.node_id;
-
-	memcpy(oid.bytes, meta.object_id, NODE_ID_SIZE);
 	node_id_to_hex(&oid, hex, sizeof hex);
 	printf("PUT %s\nObjectID: %s\n", name, hex);
 	fflush(stdout);
-	if (!store_to_superpeer(&self, host, port, &meta)) {
+
+	packed = put_request_pack(name, (const uint8_t *)value, value_len, payload, sizeof payload);
+	if (packed < 0) {
+		fprintf(stderr, "put: valor nao cabe no pedido\n");
+		return 1;
+	}
+	fd = net_connect(host, port);
+	if (fd < 0) {
+		fprintf(stderr, "put: nao conectou ao Super Peer %s:%u\n", host, port);
+		return 1;
+	}
+	memset(&hdr, 0, sizeof hdr);
+	hdr.protocol_ver = PROTOCOL_VER;
+	hdr.msg_type = PUT;
+	hdr.time = (uint64_t)time(NULL);
+	hdr.pl_size = (uint32_t)packed;
+	memcpy(hdr.src_node, self.node_id.bytes, NODE_ID_SIZE);
+	ok = 0;
+	if (simple_send(fd, frame, payload, (uint32_t)packed, &hdr) == NET_OK) {
+		printf("TX PUT\n");
+		reply = simple_recv(fd, reply_buf, sizeof reply_buf);
+		if (reply.status == NET_OK && reply.header.msg_type == ACK) {
+			printf("RX %s\n", message_type_name(reply.header.msg_type));
+			ok = 1;
+		}
+	}
+	net_close(fd);
+	if (!ok) {
 		fprintf(stderr, "put: Super Peer nao confirmou %s\n", name);
 		return 1;
 	}

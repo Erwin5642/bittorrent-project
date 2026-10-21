@@ -82,6 +82,7 @@ enum message_type{
 	FIND_SUCCESSOR,  /**< Caminho de lookup até o dono de um ObjectID. */
 	LOG_APPEND,      /**< Uma entrada do operation log (CP4, payload variável). */
 	GET_STATE,       /**< Estado do Super Peer para o cliente (CP4): pedido vazio, resposta em texto. */
+	PUT,             /**< Pedido do cliente para selar um PUT no operation log (CP4). */
 	MSG_TYPE_MAX,    /**< Sentinela: número de tipos válidos. */
 };
 
@@ -704,5 +705,36 @@ ssize_t log_append_pack(const smr_entry_t *entry, uint8_t *out, size_t out_cap);
  * @return 1 em sucesso, 0 se o buffer, o nome ou o checksum forem inválidos.
  */
 int log_append_unpack(smr_entry_t *out, const uint8_t *in, size_t in_len);
+
+/**
+ * @brief Serializa o pedido @c PUT do cliente.
+ *
+ * Layout em big-endian: @c name_len (uint16), os bytes do nome sem o NUL,
+ * @c value_len (uint32) e os bytes do valor. O valor não entra na hash table;
+ * o Super Peer o usa só para o ObjectID.
+ * @param name Nome lógico, NUL-terminated.
+ * @param value Bytes do valor. Pode ser NULL se @p value_len for 0.
+ * @param value_len Tamanho de @p value.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out, em bytes.
+ * @return Bytes escritos, ou -1 se o nome, o valor ou o buffer forem inválidos.
+ */
+ssize_t put_request_pack(const char *name, const uint8_t *value, size_t value_len,
+                         uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Reconstrói nome e valor de um payload de @c put_request_pack.
+ *
+ * @p value aponta para dentro de @p in. O caller não libera esse ponteiro.
+ * @param name Destino do nome, NUL-terminated; o caller aloca.
+ * @param name_cap Capacidade de @p name, em bytes, incluindo o NUL.
+ * @param value Recebe o ponteiro para os bytes do valor dentro de @p in.
+ * @param value_len Recebe o tamanho do valor.
+ * @param in Payload recebido, sem o header.
+ * @param in_len Tamanho de @p in. Tem de bater com o layout.
+ * @return 1 em sucesso, 0 se o buffer ou o nome forem inválidos.
+ */
+int put_request_unpack(char *name, size_t name_cap, const uint8_t **value, size_t *value_len,
+                       const uint8_t *in, size_t in_len);
 
 #endif
