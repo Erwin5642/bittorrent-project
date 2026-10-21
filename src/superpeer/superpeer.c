@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -344,6 +345,12 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     fprintf(stderr, "superpeer_init: type must be superpeer\n");
     return 0;
   }
+  /* Roster (CP4): a coluna `prioridade` decide a eleição Bully. Sem roster
+     (C1/C2), a tabela fica vazia e a eleição cai no NodeID. */
+  if (roster_name[0] &&
+      !node_roster_priorities(conf_path, sp->roster, CONFIG_ROSTER_MAX, &sp->roster_count)) {
+    sp->roster_count = 0;
+  }
 
   if (port != 0) {
     cfg.port = port;
@@ -385,6 +392,13 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     return 0;
   }
 
+  /* Estado de coordenação (CP4): começa sem coordenador conhecido, como FOLLOWER.
+     A eleição Bully no boot decide o líder inicial. */
+  memset(&sp->coordinator_id, 0, sizeof sp->coordinator_id);
+  sp->has_coordinator = 0;
+  sp->coord_role = COORD_FOLLOWER;
+  sp->election_needed = 0;
+
   if (pthread_mutex_init(&sp->members_lock, NULL) != 0) {
     fprintf(stderr, "superpeer_init: failed to init mutex\n");
     return 0;
@@ -394,8 +408,26 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
+  if (pthread_mutex_init(&sp->coord_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init coord mutex\n");
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
+  smr_log_init(&sp->smr);
+  if (pthread_mutex_init(&sp->smr_lock, NULL) != 0) {
+    fprintf(stderr, "superpeer_init: failed to init smr mutex\n");
+    smr_log_shutdown(&sp->smr);
+    pthread_mutex_destroy(&sp->coord_lock);
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
   if (!chord_init(&sp->chord)) {
     fprintf(stderr, "superpeer_init: failed to init chord\n");
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
+    pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
@@ -403,6 +435,9 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   if (!chord_create(&sp->chord, &sp->self_id, cfg.ipv4, cfg.port)) {
     fprintf(stderr, "superpeer_init: failed to create chord ring\n");
     chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
+    pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
@@ -410,6 +445,9 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   fd = net_listen(cfg.port);
   if (fd < 0) {
     chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
+    pthread_mutex_destroy(&sp->coord_lock);
     pthread_mutex_destroy(&sp->metadata_lock);
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
@@ -542,20 +580,30 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
     return 0;
   }
 
-  if (!metadata_table_put(&sp->metadata, &meta)) {
-    const int full = metadata_table_find_id(&sp->metadata, meta.object_id) == NULL &&
-                     sp->metadata.count >= METADATA_TABLE_MAX;
+  if (!smr_propose_store(sp, &meta)) {
+    int full;
+
+    pthread_mutex_lock(&sp->metadata_lock);
+    full = metadata_table_find_id(&sp->metadata, meta.object_id) == NULL &&
+           sp->metadata.count >= METADATA_TABLE_MAX;
+    pthread_mutex_unlock(&sp->metadata_lock);
     metadata_release(&meta);
     if (full) {
       fill_join_error(err, 6, "metadata table full");
     } else {
-      fill_join_error(err, 1, "malformed STORE payload");
+      fill_join_error(err, 1, "replication failed");
     }
     return 0;
   }
 
-  const file_metadata_t* stored = metadata_table_find_id(&sp->metadata, meta.object_id);
-  metadata_record_print(stored);
+  pthread_mutex_lock(&sp->metadata_lock);
+  {
+    const file_metadata_t *stored = metadata_table_find_id(&sp->metadata, meta.object_id);
+    if (stored) {
+      metadata_record_print(stored);
+    }
+  }
+  pthread_mutex_unlock(&sp->metadata_lock);
   metadata_release(&meta);
   memcpy(ack->node_id, hdr->src_node, NODE_ID_SIZE);
   return 1;
@@ -850,9 +898,7 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
 
     memset(&ack, 0, sizeof ack);
     memset(&err, 0, sizeof err);
-    pthread_mutex_lock(&sp->metadata_lock);
     ok = superpeer_handle_store(sp, &msg.header, in_buf, msg.header.pl_size, &ack, &err);
-    pthread_mutex_unlock(&sp->metadata_lock);
     if (ok) {
       send_ack(conn, &msg.header, &sp->self_id, &ack);
     } else {
@@ -862,6 +908,8 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       send_error(conn, &msg.header, &sp->self_id, err.code,
                  err.reason[0] ? (const char *)err.reason : "STORE rejected");
     }
+  } else if (msg.header.msg_type == LOG_APPEND) {
+    smr_ingest_append(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == LOOKUP) {
     uint8_t reply[METADATA_PAYLOAD_MAX];
     size_t reply_len = 0;
@@ -962,6 +1010,28 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
         send_raw(conn, &msg.header, &sp->self_id, GOSSIP, reply, (uint32_t)packed);
       }
     }
+  } else if (msg.header.msg_type == ELECTION) {
+	/* RX ELECTION (CP4): vem de um no de prioridade menor. Responde OK e pede a
+	   propria eleicao (este no, sendo superior, pode vencer). */
+	send_ok(conn, &sp->self_id);
+	pthread_mutex_lock(&sp->coord_lock);
+	sp->election_needed = 1;
+	pthread_mutex_unlock(&sp->coord_lock);
+  } else if (msg.header.msg_type == COORDINATOR) {
+	/* RX COORDINATOR (CP4): registra o novo lider e vira FOLLOWER (ou LEADER se o
+	   anuncio for o proprio NodeID). */
+	node_id_t leader;
+	char leader_hex[NODE_ID_HEX_SIZE];
+	memcpy(&leader, msg.header.src_node, NODE_ID_SIZE);
+	pthread_mutex_lock(&sp->coord_lock);
+	sp->coordinator_id = leader;
+	sp->has_coordinator = 1;
+	sp->coord_role = (node_id_cmp(&leader, &sp->self_id) == 0) ? COORD_LEADER : COORD_FOLLOWER;
+	pthread_mutex_unlock(&sp->coord_lock);
+	node_id_to_hex(&leader, leader_hex, NODE_ID_HEX_SIZE);
+	printf("COORDINATOR %s\n", leader_hex);
+	fflush(stdout);
+	smr_on_coordinator(sp, &leader, node_id_cmp(&leader, &sp->self_id) == 0);
   } else if (msg.header.msg_type == CLOSEST_PRECEDING) {
     node_id_t key;
     chord_node_t step;
@@ -1029,6 +1099,39 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
       } else {
         send_raw(conn, &msg.header, &sp->self_id, GET_SUCCESSORS, reply, (uint32_t)n);
       }
+    }
+  } else if (msg.header.msg_type == GET_STATE) {
+    /* GET_STATE (CP4): texto pronto com o que a hash table guarda, para o
+       `--cmd state` do cliente imprimir como veio. A linha do LogIndex do SMR
+       entra neste texto quando o log existir. */
+    char text[MAX_CONTROL_PAYLOAD_SZ];
+    size_t len = 0;
+    size_t i;
+    int w;
+
+    if (msg.header.pl_size != 0) {
+      send_error(conn, &msg.header, &sp->self_id, 1, "malformed GET_STATE payload");
+    } else {
+      pthread_mutex_lock(&sp->metadata_lock);
+      w = snprintf(text, sizeof text, "Objects: %zu\n", sp->metadata.count);
+      if (w > 0 && (size_t)w < sizeof text) {
+        len = (size_t)w;
+      }
+      for (i = 0; i < METADATA_TABLE_MAX; i++) {
+        const metadata_slot_t *slot = &sp->metadata.slots[i];
+
+        if (!slot->in_use) {
+          continue;
+        }
+        w = snprintf(text + len, sizeof text - len, "%s v%u\n", slot->meta.filename,
+                     (unsigned)slot->meta.version);
+        if (w < 0 || (size_t)w >= sizeof text - len) {
+          break; /* não cabe no teto de controle: corta a lista */
+        }
+        len += (size_t)w;
+      }
+      pthread_mutex_unlock(&sp->metadata_lock);
+      send_raw(conn, &msg.header, &sp->self_id, GET_STATE, (const uint8_t *)text, (uint32_t)len);
     }
   } else if (msg.header.msg_type == NOTIFY) {
     ack_t ack;
@@ -1112,6 +1215,17 @@ static void *heartbeat_worker(void *arg) {
 		int send_now = (now - last_hb >= HEARTBEAT_SEC);
 		member_t targets[MEMBER_TABLE_MAX_SIZE];
 		size_t target_count = 0;
+
+		/* Snapshot do coordenador antes do members_lock: coord_lock e members_lock
+		   nunca sao tomados juntos (ordem de lock). */
+		node_id_t coord_id;
+		int has_coord;
+		int coord_lost = 0;
+		pthread_mutex_lock(&sp->coord_lock);
+		coord_id = sp->coordinator_id;
+		has_coord = sp->has_coordinator;
+		pthread_mutex_unlock(&sp->coord_lock);
+
 		pthread_mutex_lock(&sp->members_lock);
 		for(size_t i = 0; i < sp->members.count; i++){
 			member_t* sel_member = &sp->members.entries[i];
@@ -1126,11 +1240,22 @@ static void *heartbeat_worker(void *arg) {
 				node_id_to_hex(&sel_member->id, hex, NODE_ID_HEX_SIZE);
 				printf("SUSPECT %s %s:%d\n", hex, ip, sel_member->port);
 			}
+			/* CP4: coordenador deixou de estar ALIVE -> dispara eleicao. */
+			if(has_coord && node_id_cmp(&sel_member->id, &coord_id) == 0 && sel_member->state != MEMBER_ALIVE){
+				coord_lost = 1;
+			}
 			if(send_now && sel_member->node_type == SUPERPEER && sel_member->state != MEMBER_FAILED && sel_member->state != MEMBER_REMOVED){
 				targets[target_count++] = *sel_member;
 			}
 		}
 		pthread_mutex_unlock(&sp->members_lock);
+
+		if(coord_lost){
+			pthread_mutex_lock(&sp->coord_lock);
+			sp->has_coordinator = 0;
+			sp->election_needed = 1;
+			pthread_mutex_unlock(&sp->coord_lock);
+		}
 
 		if(send_now){
 			for(size_t i = 0; i < target_count; i++){
@@ -1146,6 +1271,203 @@ static void *heartbeat_worker(void *arg) {
 		}
 
 		sleep_ms(sleep_interval_ms);
+	}
+
+	return NULL;
+}
+
+/* Ajusta o timeout de recepcao do socket, para a RPC de eleicao nao travar
+   esperando OK de um no superior que caiu (honra ELECTION_TIMEOUT_SEC / RNF-010). */
+static void set_recv_timeout(int fd, int seconds) {
+	struct timeval tv;
+
+	tv.tv_sec = seconds;
+	tv.tv_usec = 0;
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
+/* Prioridade Bully (CP4): coluna `prioridade` do roster, achada por IP+porta.
+   Fora do roster (ou sem roster, C1/C2) vale 0. */
+static uint32_t roster_priority(const superpeer_t *sp, uint32_t ipv4, uint16_t port) {
+	for (size_t i = 0; i < sp->roster_count; i++) {
+		if (sp->roster[i].ipv4 == ipv4 && sp->roster[i].port == port) {
+			return sp->roster[i].priority;
+		}
+	}
+	return 0;
+}
+
+/* Ordem da eleicao: 1 se @p m vence este no. A prioridade do roster decide e o
+   NodeID so desempata, entao sem roster tudo segue pelo NodeID. */
+static int outranks_self(const superpeer_t *sp, const member_t *m) {
+	uint32_t pm = roster_priority(sp, m->ipv4, m->port);
+	uint32_t ps = roster_priority(sp, sp->cfg.ipv4, sp->cfg.port);
+
+	if (pm != ps) {
+		return pm > ps;
+	}
+	return node_id_cmp(&m->id, &sp->self_id) > 0;
+}
+
+/* RPC de eleicao: envia ELECTION a um no de prioridade maior e espera o OK no mesmo
+   socket. Retorna 1 se um OK chegou (ha no superior vivo), 0 caso contrario
+   (conexao recusada, timeout ou erro). E a propria RPC que testa a vida do no. */
+static int election_contact(superpeer_t *sp, const member_t *higher) {
+	char ip[INET_ADDRSTRLEN];
+	uint8_t rbuf[HEADER_SIZE];
+	msg_t reply;
+	int fd;
+
+	if (!inet_ntop(AF_INET, &higher->ipv4, ip, sizeof ip)) {
+		return 0;
+	}
+	fd = net_connect(ip, higher->port);
+	if (fd < 0) {
+		return 0;
+	}
+	set_recv_timeout(fd, ELECTION_TIMEOUT_SEC);
+	if (send_election(fd, &sp->self_id) != NET_OK) {
+		net_close(fd);
+		return 0;
+	}
+	reply = recv_message(fd, rbuf, sizeof rbuf, NULL, 0);
+	net_close(fd);
+	return reply.status == NET_OK && reply.header.msg_type == OK;
+}
+
+/* Anuncia o coordenador eleito: COORDINATOR (unidirecional) para os demais Super
+   Peers vivos. Mesmo molde do heartbeat: snapshot sob members_lock, envio fora. */
+static void broadcast_coordinator(superpeer_t *sp) {
+	member_t targets[MEMBER_TABLE_MAX_SIZE];
+	size_t count = 0;
+	char ip[INET_ADDRSTRLEN];
+
+	pthread_mutex_lock(&sp->members_lock);
+	for (size_t i = 0; i < sp->members.count; i++) {
+		member_t *m = &sp->members.entries[i];
+
+		if (node_id_cmp(&m->id, &sp->self_id) == 0) {
+			continue;
+		}
+		if (m->node_type == SUPERPEER && m->state != MEMBER_FAILED && m->state != MEMBER_REMOVED) {
+			targets[count++] = *m;
+		}
+	}
+	pthread_mutex_unlock(&sp->members_lock);
+
+	for (size_t i = 0; i < count; i++) {
+		int fd;
+
+		if (!inet_ntop(AF_INET, &targets[i].ipv4, ip, sizeof ip)) {
+			continue;
+		}
+		fd = net_connect(ip, targets[i].port);
+		if (fd >= 0) {
+			send_coordinator(fd, &sp->self_id);
+			net_close(fd);
+		}
+	}
+}
+
+/* Uma rodada de eleicao Bully. Contata os Super Peers de prioridade maior; se algum
+   responde OK, cede e espera o anuncio COORDINATOR (retorna 0). Se nenhum responde,
+   este no vence: vira COORD_LEADER, grava a si como coordenador e anuncia (retorna 1). */
+static int start_election(superpeer_t *sp) {
+	member_t higher[MEMBER_TABLE_MAX_SIZE];
+	size_t higher_count = 0;
+	char hex[NODE_ID_HEX_SIZE];
+	int got_ok = 0;
+
+	pthread_mutex_lock(&sp->coord_lock);
+	sp->coord_role = COORD_CANDIDATE;
+	pthread_mutex_unlock(&sp->coord_lock);
+
+	node_id_to_hex(&sp->self_id, hex, NODE_ID_HEX_SIZE);
+	printf("ELECTION started by %s\n", hex);
+	fflush(stdout);
+
+	/* Snapshot dos nos de maior prioridade (outranks_self). Inclui ALIVE e SUSPECT:
+	   a RPC em si e o teste de vida; so FAILED/REMOVED ficam de fora. */
+	pthread_mutex_lock(&sp->members_lock);
+	for (size_t i = 0; i < sp->members.count; i++) {
+		member_t *m = &sp->members.entries[i];
+
+		if (m->node_type == SUPERPEER && m->state != MEMBER_FAILED && m->state != MEMBER_REMOVED &&
+		    outranks_self(sp, m)) {
+			higher[higher_count++] = *m;
+		}
+	}
+	pthread_mutex_unlock(&sp->members_lock);
+
+	for (size_t i = 0; i < higher_count; i++) {
+		if (election_contact(sp, &higher[i])) {
+			got_ok = 1;
+		}
+	}
+
+	if (got_ok) {
+		/* Existe no superior vivo: cede e espera o COORDINATOR dele. */
+		pthread_mutex_lock(&sp->coord_lock);
+		if (sp->coord_role == COORD_CANDIDATE) {
+			sp->coord_role = COORD_FOLLOWER;
+		}
+		pthread_mutex_unlock(&sp->coord_lock);
+		return 0;
+	}
+
+	/* Ninguem superior respondeu: este no vence. */
+	pthread_mutex_lock(&sp->coord_lock);
+	sp->coordinator_id = sp->self_id;
+	sp->has_coordinator = 1;
+	sp->coord_role = COORD_LEADER;
+	pthread_mutex_unlock(&sp->coord_lock);
+
+	printf("highest NodeID wins\nCOORDINATOR %s\n", hex);
+	fflush(stdout);
+	broadcast_coordinator(sp);
+	smr_on_coordinator(sp, &sp->self_id, 1);
+	return 1;
+}
+
+/*
+ * Thread de eleicao (CP4): roda para sempre, detached, junto do accept loop.
+ * Dispara uma eleicao Bully quando:
+ *   - ha um pedido pendente (election_needed), posto pelo detector de falhas
+ *     (coordenador deixou de estar ALIVE) ou pelo RX de um ELECTION de no inferior; ou
+ *   - ainda nao se conhece coordenador, passada a graca de boot
+ *     (ELECTION_BOOT_GRACE_SEC), tempo para a membership povoar.
+ * Quando cede a um no superior, espera COORDINATOR_WAIT_SEC pelo anuncio antes de
+ * tentar de novo, para nao reiniciar a eleicao a cada tick.
+ */
+static void *election_worker(void *arg) {
+	superpeer_t *sp = arg;
+	time_t start = (time_t)time(NULL);
+	time_t defer_until = 0;
+
+	while (1) {
+		time_t now = (time_t)time(NULL);
+		int needed;
+		int has_coord;
+		int trigger;
+
+		pthread_mutex_lock(&sp->coord_lock);
+		needed = sp->election_needed;
+		sp->election_needed = 0;
+		has_coord = sp->has_coordinator;
+		pthread_mutex_unlock(&sp->coord_lock);
+
+		trigger = needed;
+		if (!has_coord && now - start >= ELECTION_BOOT_GRACE_SEC && now >= defer_until) {
+			trigger = 1;
+		}
+
+		if (trigger) {
+			if (start_election(sp) == 0) {
+				defer_until = now + COORDINATOR_WAIT_SEC;
+			}
+		}
+
+		sleep_ms(500);
 	}
 
 	return NULL;
@@ -1833,6 +2155,7 @@ int superpeer_run(superpeer_t *sp) {
   pthread_t maintenance;
   pthread_t hb;
   pthread_t gossip;
+  pthread_t election;
 
   if (!sp || sp->listend_fd < 0) {
     return 0;
@@ -1845,6 +2168,9 @@ int superpeer_run(superpeer_t *sp) {
   }
   if (pthread_create(&gossip, NULL, gossip_worker, sp) == 0) {
     pthread_detach(gossip);
+  }
+  if (pthread_create(&election, NULL, election_worker, sp) == 0) {
+    pthread_detach(election);
   }
   if (pthread_create(&maintenance, NULL, chord_maintenance, sp) == 0) {
     pthread_detach(maintenance);

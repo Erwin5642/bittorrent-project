@@ -70,18 +70,61 @@ int metadata_table_put(metadata_table_t *table, const file_metadata_t *meta);
  * @param table Tabela a consultar.
  * @param object_id Chave de 32 bytes.
  * @return Ponteiro para o registro interno, ou NULL se não houver.
- * @note O ponteiro vale até o próximo @c metadata_table_put ou @c metadata_table_clear.
+ * @note O ponteiro vale até o próximo @c metadata_table_put, @c metadata_table_install,
+ *       @c metadata_table_delete ou @c metadata_table_clear.
  */
 const file_metadata_t *metadata_table_find_id(const metadata_table_t *table,
                                               const uint8_t object_id[METADATA_OBJECT_ID_SIZE]);
+
+/**
+ * @brief Devolve o índice do slot com esse ObjectID.
+ *
+ * A busca cai no balde do hash e percorre só a lista desse balde.
+ * @param table Tabela a consultar.
+ * @param object_id Chave de 32 bytes.
+ * @return Índice em @c table->slots, ou -1 se a chave não estiver ou se um
+ *         argumento for nulo.
+ * @note O índice vale até o próximo @c metadata_table_put, @c metadata_table_install,
+ *       @c metadata_table_delete ou @c metadata_table_clear.
+ */
+int metadata_table_find_slot(const metadata_table_t *table,
+                             const uint8_t object_id[METADATA_OBJECT_ID_SIZE]);
 
 /**
  * @brief Busca um registro pelo nome lógico.
  * @param table Tabela a consultar.
  * @param filename Nome NUL-terminated. A comparação é exata.
  * @return Ponteiro para o primeiro registro com esse nome, ou NULL.
- * @note O ponteiro vale até o próximo @c metadata_table_put ou @c metadata_table_clear.
+ * @note O ponteiro vale até o próximo @c metadata_table_put, @c metadata_table_install,
+ *       @c metadata_table_delete ou @c metadata_table_clear.
  */
 const file_metadata_t *metadata_table_find_name(const metadata_table_t *table, const char *filename);
+
+/**
+ * @brief Remove o registro com esse ObjectID.
+ *
+ * O slot sai da lista do balde do hash e o bloco de hashes é liberado.
+ * Chave ausente não altera a tabela.
+ * @param table Tabela de destino.
+ * @param object_id Chave de 32 bytes.
+ * @return 1 se removeu um registro, 0 se a chave não estava ou se um
+ *         argumento for nulo.
+ */
+int metadata_table_delete(metadata_table_t *table, const uint8_t object_id[METADATA_OBJECT_ID_SIZE]);
+
+/**
+ * @brief Copia um registro com a @c version que já veio na entrada.
+ *
+ * Mesmos campos de @c metadata_table_put. A @c version do registro é gravada
+ * como está, na inserção e na substituição. Replay da mesma entrada não soma
+ * de novo.
+ * @param table Tabela de destino.
+ * @param meta Registro a copiar. @c filename é string não vazia.
+ *             @c chunk_hashes é obrigatório quando @c chunk_count é maior que zero.
+ * @return 1 em sucesso, 0 se argumento inválido, ObjectID zerado, nome vazio
+ *         ou tabela cheia numa inserção nova.
+ * @note Tabela cheia não escreve fora do pool e não altera o registro existente.
+ */
+int metadata_table_install(metadata_table_t *table, const file_metadata_t *meta);
 
 #endif

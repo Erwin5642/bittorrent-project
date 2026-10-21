@@ -80,6 +80,8 @@ enum message_type{
 	GET_SUCCESSORS,  /**< Pede a lista de sucessores. */
 	NOTIFY,          /**< Avisa o sucessor de um nó recém-chegado (payload @c chord_peer_t). */
 	FIND_SUCCESSOR,  /**< Caminho de lookup até o dono de um ObjectID. */
+	LOG_APPEND,      /**< Uma entrada do operation log (CP4, payload variável). */
+	GET_STATE,       /**< Estado do Super Peer para o cliente (CP4): pedido vazio, resposta em texto. */
 	MSG_TYPE_MAX,    /**< Sentinela: número de tipos válidos. */
 };
 
@@ -178,8 +180,9 @@ ssize_t serialize_message(uint8_t *out_buf, size_t out_cap, const void *payload,
  *
  * Lê o header em @p in_buf, confere o CRC32 do payload e só então faz o unpack
  * do tipo (@c JOIN, @c LEAVE, @c ACK, @c ERROR). PING/PONG não têm payload.
- * @c STORE, @c LOOKUP, @c DOWNLOAD_REQ e @c DOWNLOAD_REP passam com o payload
- * cru: o handler desserializa. O teto desses tipos é @c MAX_DATA_PAYLOAD_SZ.
+ * @c STORE, @c LOOKUP, @c DOWNLOAD_REQ, @c DOWNLOAD_REP e @c LOG_APPEND passam
+ * com o payload cru: o handler desserializa. O teto desses tipos é
+ * @c MAX_DATA_PAYLOAD_SZ.
  * @param in_buf Mensagem completa: @c HEADER_SIZE bytes de header e em seguida o payload.
  * @param buf_len Bytes válidos em @p in_buf. Precisa cobrir @c HEADER_SIZE + @c pl_size.
  * @param out_hdr Recebe o header; o caller aloca.
@@ -208,8 +211,9 @@ int send_message(int fd, uint8_t *out_msg_buffer, size_t buf_size, const void *m
  *
  * Lê o header, confere @c PROTOCOL_VER, o tipo e @c pl_size, lê o payload
  * inteiro e valida o CRC32. Controle (@c JOIN, @c LEAVE, @c ACK, @c ERROR)
- * vai para @p struct_payload. @c STORE, @c LOOKUP, @c DOWNLOAD_REQ e
- * @c DOWNLOAD_REP ficam crus em @p in_msg_buffer, até @c MAX_DATA_PAYLOAD_SZ.
+ * vai para @p struct_payload. @c STORE, @c LOOKUP, @c DOWNLOAD_REQ,
+ * @c DOWNLOAD_REP e @c LOG_APPEND ficam crus em @p in_msg_buffer, até
+ * @c MAX_DATA_PAYLOAD_SZ.
  * @param fd Socket conectado.
  * @param in_msg_buffer Buffer de trabalho para o payload cru. Para
  *        @c DOWNLOAD_REP precisa caber @c MAX_DATA_PAYLOAD_SZ.
@@ -225,7 +229,8 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size, void *str
  * @brief Envia um header seguido de um payload de bytes já empacotados.
  *
  * Controle fica no teto @c MAX_CONTROL_PAYLOAD_SZ. @c STORE, @c LOOKUP,
- * @c DOWNLOAD_REQ e @c DOWNLOAD_REP podem ir até @c MAX_DATA_PAYLOAD_SZ.
+ * @c DOWNLOAD_REQ, @c DOWNLOAD_REP e @c LOG_APPEND podem ir até
+ * @c MAX_DATA_PAYLOAD_SZ.
  * @param fd Socket conectado.
  * @param out_msg_buffer Buffer de trabalho; ao menos @c HEADER_SIZE + @p str_size bytes.
  * @param payload Bytes do payload.
@@ -466,6 +471,30 @@ int gossip_members_unpack(gossip_member_t *rows, unsigned cap, unsigned *count, 
 int send_heartbeat(int fd, const node_id_t *self);
 
 /**
+ * @brief Inicia uma eleição Bully: envia ELECTION (mensagem de origem, sem payload).
+ * @param fd Socket conectado ao nó de maior prioridade.
+ * @param self NodeID de quem inicia a eleição (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_election(int fd, const node_id_t *self);
+
+/**
+ * @brief Responde OK a um ELECTION, sinalizando que há nó superior vivo. Sem payload.
+ * @param fd Socket conectado ao nó que iniciou a eleição.
+ * @param self NodeID de quem responde (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_ok(int fd, const node_id_t *self);
+
+/**
+ * @brief Anuncia o novo coordenador eleito: envia COORDINATOR (mensagem de origem), sem payload.
+ * @param fd Socket conectado a um dos demais Super Peers.
+ * @param self NodeID do coordenador eleito (vira @c src_node).
+ * @return @c NET_OK em sucesso, @c NET_ERROR caso contrário.
+ */
+int send_coordinator(int fd, const node_id_t *self);
+
+/**
  * @brief Tamanho fixo do payload de um tipo de controle.
  * @param t Valor de @c message_type.
  * @return Bytes do payload (0 para PING/PONG), ou @c -1 se @p t estiver fora de faixa.
@@ -651,5 +680,80 @@ ssize_t download_rep_pack(const uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint
 int download_rep_unpack(uint8_t object_id[METADATA_OBJECT_ID_SIZE], uint32_t *chunk_index,
                         uint32_t *original_len, const uint8_t **comp, uint32_t *comp_len,
                         const uint8_t *in, size_t in_len);
+
+/** TransactionID de uma entrada do operation log, em bytes. Igual a @c trsc_id. */
+#define SMR_TRSC_ID_SIZE 16
+
+/** SHA-256 do comando canônico, em bytes. */
+#define SMR_CHECKSUM_SIZE 32
+
+/**
+ * @brief Operação registrada no log.
+ *
+ * Os valores são o byte da operação no fio. @c SMR_OP_PUT é o par nome/valor
+ * do harness; as outras três são as operações da máquina de estados da spec.
+ */
+typedef enum {
+  SMR_OP_STORE = 1,  /**< Publicação de @c file_metadata_t. */
+  SMR_OP_DELETE = 2, /**< Remoção lógica pelo ObjectID. */
+  SMR_OP_UPDATE = 3, /**< Substituição de um registro já existente. */
+  SMR_OP_PUT = 4     /**< Nome e valor do harness; o ObjectID é SHA-256(nome || valor). */
+} smr_op_t;
+
+/**
+ * @brief Uma entrada do operation log, também o corpo de @c LOG_APPEND.
+ *
+ * @c timestamp é tempo lógico e repete @c log_index. @c version é a versão
+ * que a hash table fica depois do apply, a mesma de @c file_metadata_t.
+ * @c stored vale para @c SMR_OP_STORE e @c SMR_OP_UPDATE; nas outras
+ * operações @c chunk_hashes fica NULL. O log é dono desse bloco.
+ */
+typedef struct {
+  uint64_t log_index;                         /**< Sequência global. A primeira entrada é 1. */
+  uint8_t transaction_id[SMR_TRSC_ID_SIZE];   /**< Identificador da operação. */
+  smr_op_t operation;                         /**< O que o apply executa. */
+  uint8_t object_id[METADATA_OBJECT_ID_SIZE]; /**< Chave do registro. */
+  uint64_t timestamp;                         /**< Tempo lógico, igual a @c log_index. */
+  uint32_t version;                           /**< Versão do registro depois do apply. */
+  uint8_t checksum[SMR_CHECKSUM_SIZE];        /**< SHA-256 do comando com este campo zerado. */
+  char name[METADATA_FILENAME_MAX];           /**< Nome lógico, NUL-terminated. */
+  file_metadata_t stored;                     /**< Registro a instalar em STORE/UPDATE. */
+} smr_entry_t;
+
+/**
+ * @brief Prefixo fixo de @c LOG_APPEND, antes do corpo opcional de metadata.
+ *
+ * operation (1) + log_index (8) + transaction_id (16) + object_id (32) +
+ * timestamp (8) + version (4) + checksum (32) + name (256) + stored_len (4).
+ * Inteiros em big-endian. @c stored_len bytes de @c metadata_pack seguem o
+ * prefixo em @c SMR_OP_STORE e @c SMR_OP_UPDATE; nas outras operações o
+ * tamanho é 0.
+ */
+#define LOG_APPEND_PREFIX 361
+
+/**
+ * @brief Serializa uma entrada de @c LOG_APPEND em big-endian, sem ponteiros.
+ *
+ * O checksum vai no fio como está. Quem sela a entrada zera esse campo antes
+ * de calcular o SHA-256 do comando.
+ * @param entry Entrada de origem.
+ * @param out Destino; o caller aloca.
+ * @param out_cap Capacidade de @p out, em bytes.
+ * @return Bytes escritos, ou -1 se a entrada ou o buffer forem inválidos.
+ */
+ssize_t log_append_pack(const smr_entry_t *entry, uint8_t *out, size_t out_cap);
+
+/**
+ * @brief Reconstrói uma entrada a partir do layout de @c log_append_pack.
+ *
+ * Aloca @c stored.chunk_hashes quando a operação traz hashes. O caller libera
+ * com @c metadata_release em @c stored. Checksum divergente falha sem deixar
+ * memória pendente.
+ * @param out Destino; o caller aloca o struct.
+ * @param in Bytes do payload, sem o header de mensagem.
+ * @param in_len Tamanho de @p in.
+ * @return 1 em sucesso, 0 se o buffer, o nome ou o checksum forem inválidos.
+ */
+int log_append_unpack(smr_entry_t *out, const uint8_t *in, size_t in_len);
 
 #endif

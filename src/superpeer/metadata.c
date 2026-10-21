@@ -38,10 +38,16 @@ static int metadata_copy(file_metadata_t *dst, const file_metadata_t *src) {
   return 1;
 }
 
-static int metadata_find_slot(const metadata_table_t *table, const uint8_t *object_id) {
-  unsigned bucket = metadata_bucket(object_id);
-  int idx = table->buckets[bucket];
+int metadata_table_find_slot(const metadata_table_t *table,
+                             const uint8_t object_id[METADATA_OBJECT_ID_SIZE]) {
+  unsigned bucket;
+  int idx;
 
+  if (!table || !object_id) {
+    return -1;
+  }
+  bucket = metadata_bucket(object_id);
+  idx = table->buckets[bucket];
   while (idx != -1) {
     if (table->slots[idx].in_use && metadata_same_id(table->slots[idx].meta.object_id, object_id)) {
       return idx;
@@ -89,7 +95,8 @@ void metadata_table_clear(metadata_table_t *table) {
   metadata_table_init(table);
 }
 
-int metadata_table_put(metadata_table_t *table, const file_metadata_t *meta) {
+/* bump_version soma 1 na chave que ja existe. O install grava a version como veio. */
+static int metadata_table_write(metadata_table_t *table, const file_metadata_t *meta, int bump_version) {
   file_metadata_t copy;
 
   if (!table || !meta) {
@@ -105,7 +112,7 @@ int metadata_table_put(metadata_table_t *table, const file_metadata_t *meta) {
     return 0;
   }
 
-  const int existing = metadata_find_slot(table, meta->object_id);
+  const int existing = metadata_table_find_slot(table, meta->object_id);
   if (existing < 0 && table->count >= METADATA_TABLE_MAX) {
     return 0;
   }
@@ -114,7 +121,9 @@ int metadata_table_put(metadata_table_t *table, const file_metadata_t *meta) {
   }
 
   if (existing >= 0) {
-    copy.version = table->slots[existing].meta.version + 1;
+    if (bump_version) {
+      copy.version = table->slots[existing].meta.version + 1;
+    }
     metadata_release(&table->slots[existing].meta);
     table->slots[existing].meta = copy;
     return 1;
@@ -135,18 +144,51 @@ int metadata_table_put(metadata_table_t *table, const file_metadata_t *meta) {
   return 1;
 }
 
+int metadata_table_put(metadata_table_t *table, const file_metadata_t *meta) {
+  return metadata_table_write(table, meta, 1);
+}
+
+int metadata_table_install(metadata_table_t *table, const file_metadata_t *meta) {
+  return metadata_table_write(table, meta, 0);
+}
+
 const file_metadata_t *metadata_table_find_id(const metadata_table_t *table,
                                               const uint8_t object_id[METADATA_OBJECT_ID_SIZE]) {
   int idx;
 
-  if (!table || !object_id) {
-    return NULL;
-  }
-  idx = metadata_find_slot(table, object_id);
+  idx = metadata_table_find_slot(table, object_id);
   if (idx < 0) {
     return NULL;
   }
   return &table->slots[idx].meta;
+}
+
+/* O indice vem do hash. A lista desligada e so a desse balde. */
+int metadata_table_delete(metadata_table_t *table, const uint8_t object_id[METADATA_OBJECT_ID_SIZE]) {
+  unsigned bucket;
+  int *link;
+  int slot;
+
+  slot = metadata_table_find_slot(table, object_id);
+  if (slot < 0) {
+    return 0;
+  }
+  bucket = metadata_bucket(object_id);
+  link = &table->buckets[bucket];
+  while (*link != -1) {
+    if (*link == slot) {
+      *link = table->slots[slot].next;
+      metadata_release(&table->slots[slot].meta);
+      table->slots[slot].in_use = 0;
+      table->slots[slot].next = -1;
+      if (table->count > 0) {
+        table->count--;
+      }
+      return 1;
+    }
+    link = &table->slots[*link].next;
+  }
+  return 0;
 }
 
 const file_metadata_t *metadata_table_find_name(const metadata_table_t *table, const char *filename) {

@@ -150,6 +150,85 @@ static void test_reject_invalid_and_full(void) {
   free(table);
 }
 
+static int bucket_of_slot(const metadata_table_t *table, int slot) {
+  size_t b;
+
+  for (b = 0; b < METADATA_TABLE_MAX; b++) {
+    int idx = table->buckets[b];
+
+    while (idx != -1) {
+      if (idx == slot) {
+        return (int)b;
+      }
+      idx = table->slots[idx].next;
+    }
+  }
+  return -1;
+}
+
+static void test_delete_unlinks_bucket_chain(void) {
+  metadata_table_t *table = malloc(sizeof *table);
+  file_metadata_t head;
+  file_metadata_t mid;
+  file_metadata_t tail;
+  int slot_head;
+  int slot_mid;
+  int slot_tail;
+  int bucket;
+  uint8_t missing[METADATA_OBJECT_ID_SIZE];
+
+  metadata_table_init(table);
+  /* Os seeds 0, 1 e 3 caem no mesmo balde do FNV-1a. A inserção nova entra na cabeça. */
+  tail = make_meta(0, "cauda.pdf", 1, 0);
+  mid = make_meta(1, "meio.pdf", 1, 2);
+  head = make_meta(3, "cabeca.pdf", 1, 0);
+  expect(metadata_table_put(table, &tail) == 1, "insere cauda");
+  expect(metadata_table_put(table, &mid) == 1, "insere meio");
+  expect(metadata_table_put(table, &head) == 1, "insere cabeca");
+
+  slot_tail = metadata_table_find_slot(table, tail.object_id);
+  slot_mid = metadata_table_find_slot(table, mid.object_id);
+  slot_head = metadata_table_find_slot(table, head.object_id);
+  expect(slot_tail >= 0 && slot_mid >= 0 && slot_head >= 0, "indices dos tres");
+  expect(slot_tail != slot_mid && slot_mid != slot_head, "indices distintos");
+  expect(memcmp(table->slots[slot_mid].meta.object_id, mid.object_id, METADATA_OBJECT_ID_SIZE) == 0,
+         "indice aponta para o meio");
+  bucket = bucket_of_slot(table, slot_head);
+  expect(bucket >= 0 && bucket_of_slot(table, slot_mid) == bucket && bucket_of_slot(table, slot_tail) == bucket,
+         "os tres dividem o balde");
+  expect(table->buckets[bucket] == slot_head, "o ultimo inserido e a cabeca");
+
+  expect(metadata_table_delete(NULL, mid.object_id) == 0, "delete com tabela NULL");
+  expect(metadata_table_delete(table, NULL) == 0, "delete com chave NULL");
+  expect(metadata_table_find_slot(NULL, mid.object_id) == -1, "busca sem tabela");
+  memset(missing, 0x5A, sizeof missing);
+  expect(metadata_table_delete(table, missing) == 0, "chave ausente");
+  expect(table->count == 3, "ausente nao mexe no count");
+
+  expect(metadata_table_delete(table, mid.object_id) == 1, "remove o meio da lista");
+  expect(table->count == 2, "count apos o meio");
+  expect(table->slots[slot_mid].in_use == 0, "slot do meio livre");
+  expect(metadata_table_find_slot(table, mid.object_id) == -1, "meio nao se acha");
+  expect(metadata_table_find_id(table, head.object_id) != NULL, "cabeca permanece");
+  expect(metadata_table_find_id(table, tail.object_id) != NULL, "cauda permanece");
+  expect(table->slots[slot_head].next == slot_tail, "a cabeca passa a apontar para a cauda");
+  expect(bucket_of_slot(table, slot_mid) < 0, "meio saiu do balde");
+
+  expect(metadata_table_delete(table, head.object_id) == 1, "remove a cabeca");
+  expect(table->buckets[bucket] == slot_tail, "a cauda vira a cabeca");
+  expect(metadata_table_find_id(table, tail.object_id) != NULL, "cauda ainda la");
+  expect(metadata_table_delete(table, tail.object_id) == 1, "remove a cauda");
+  expect(table->count == 0, "tabela vazia");
+  expect(table->buckets[bucket] == -1, "cabeca do balde vazia");
+  expect(metadata_table_delete(table, tail.object_id) == 0, "segunda remocao");
+
+  metadata_release(&head);
+  metadata_release(&mid);
+  metadata_release(&tail);
+  metadata_table_clear(table);
+  free(table);
+}
+
 static void test_two_names_same_label(void) {
   metadata_table_t *table = malloc(sizeof *table);
   file_metadata_t a;
@@ -175,6 +254,7 @@ int main(void) {
   test_put_find_and_hashes();
   test_update_increments_version();
   test_reject_invalid_and_full();
+  test_delete_unlinks_bucket_chain();
   test_two_names_same_label();
   return test_report();
 }
