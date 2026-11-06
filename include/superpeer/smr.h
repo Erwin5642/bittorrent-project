@@ -199,8 +199,9 @@ int smr_propose_put(struct superpeer *sp, const char *name, const uint8_t *value
 /**
  * @brief Avisa o log de quem passou a ser o coordenador.
  *
- * O novo líder marca o último índice aplicado e segue. Um seguidor pede
- * @c SNAPSHOT ao coordenador e aplica só o que vier em @c STATE_TRANSFER.
+ * O novo líder puxa quem estiver à frente, aborta um PREPARE sem COMMIT e marca
+ * o último índice aplicado. Um seguidor pede @c SNAPSHOT ao coordenador e
+ * aplica só o que vier em @c STATE_TRANSFER.
  * @param sp Super Peer que recebeu ou venceu o @c COORDINATOR.
  * @param coordinator_id NodeID anunciado. Nulo limpa o coordenador conhecido.
  * @param i_am_leader 1 se @p coordinator_id é este processo.
@@ -239,6 +240,22 @@ int smr_ingest_append(struct superpeer *sp, int conn, const pl_header *hdr,
  */
 int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr,
                        const uint8_t *payload, size_t len);
+
+/**
+ * @brief Fecha o slot com um @c COMMIT ou @c ABORT vindo de outra conexão.
+ *
+ * Cobre a queda do coordenador na fase @c PREPARE: o líder novo manda a
+ * decisão num socket novo. O corpo tem 24 bytes, @c transaction_id e
+ * @c log_index. O slot só fecha se os dois baterem com o @c PREPARED local.
+ * @param sp Participante.
+ * @param conn Socket da decisão. A resposta sai por aqui.
+ * @param hdr Header já validado. O tipo é @c COMMIT ou @c ABORT.
+ * @param payload Corpo, sem o header.
+ * @param len Tamanho de @p payload.
+ * @return 1 se o slot fechou, 0 se a decisão não casa com o slot.
+ */
+int smr_ingest_decision(struct superpeer *sp, int conn, const pl_header *hdr,
+                        const uint8_t *payload, size_t len);
 
 /**
  * @brief Responde um pedido @c SNAPSHOT e em seguida manda o delta.
