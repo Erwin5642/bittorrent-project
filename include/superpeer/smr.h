@@ -34,6 +34,19 @@ typedef enum {
 } smr_tx_phase_t;
 
 /**
+ * @brief Oferta do IST: marco de checkpoint e quantas entradas o pedinte não tem.
+ *
+ * O corpo são as entradas com @c log_index maior que o @c last_applied do
+ * pedinte. O formato no fio de @c SNAPSHOT e @c STATE_TRANSFER espera o
+ * contrato com o Aluno 1.
+ */
+typedef struct {
+  uint64_t checkpoint_index;    /**< Marco já gravado no log de origem. */
+  uint64_t source_last_applied; /**< @c last_applied de quem oferece. */
+  size_t missing_count;         /**< Entradas com índice acima do pedinte. */
+} smr_ist_offer_t;
+
+/**
  * @brief Log local, em ordem crescente de @c log_index.
  *
  * @c count é o número de entradas seladas. @c last_applied é 0 enquanto
@@ -139,6 +152,22 @@ smr_tx_phase_t smr_tx_decide_recover(const smr_tx_phase_t *phases, size_t n);
  * @return 1 em sucesso, 0 se argumento nulo, decisão desconhecida ou o apply falhar.
  */
 int smr_tx_finish(smr_log_t *log, metadata_table_t *table, smr_tx_phase_t decision);
+
+/**
+ * @brief Lista as entradas do log estritamente posteriores a @p requester_last.
+ *
+ * Não inclui o slot @c PREPARED. @p missing recebe ponteiros para dentro de
+ * @p log, em ordem de @c log_index, até @p missing_cap. @c missing_count conta
+ * todas, mesmo quando o array não cabe.
+ * @param log Log de quem oferece o estado.
+ * @param requester_last Último índice que o pedinte já aplicou. 0 pede o log inteiro.
+ * @param offer Destino do marco e da contagem. O caller aloca.
+ * @param missing Destino dos ponteiros. Pode ser nulo se só a contagem importa.
+ * @param missing_cap Capacidade de @p missing.
+ * @return 1 em sucesso, 0 se @p log ou @p offer for nulo.
+ */
+int smr_ist_offer(const smr_log_t *log, uint64_t requester_last, smr_ist_offer_t *offer,
+                  const smr_entry_t **missing, size_t missing_cap);
 
 /**
  * @brief Sela um @c STORE no log local ou encaminha ao coordenador.
