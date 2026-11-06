@@ -46,12 +46,13 @@ TEST_CHUNK_SERVICE = $(BIN_DIR)/test_chunk_service
 TEST_CHORD = $(BIN_DIR)/test_chord
 TEST_CHORD_RING = $(BIN_DIR)/test_chord_ring
 TEST_SMR = $(BIN_DIR)/test_smr
+TEST_2PC = $(BIN_DIR)/test_2pc
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
@@ -66,6 +67,7 @@ test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMP
 	$(TEST_CHORD)
 	$(TEST_CHORD_RING)
 	$(TEST_SMR)
+	$(TEST_2PC)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -123,6 +125,9 @@ $(BIN_DIR)/test_chord_ring: tests/superpeer/test_chord_ring.c $(SUPERPEER_OBJ) $
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_smr: tests/superpeer/test_smr.c $(METADATA_OBJ) $(SMR_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_2pc: tests/superpeer/test_2pc.c $(METADATA_OBJ) $(SMR_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compila tests/foo.c em obj/tests/foo.o

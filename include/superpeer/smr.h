@@ -21,17 +21,33 @@
 struct superpeer;
 
 /**
+ * @brief Fase local de uma transação do 2PC.
+ *
+ * O slot ocupa @c SMR_TX_PREPARED. @c SMR_TX_COMMITTED e @c SMR_TX_ABORTED
+ * são decisões: a hash table só muda na primeira.
+ */
+typedef enum {
+  SMR_TX_NONE = 0,      /**< Sem transação no slot. */
+  SMR_TX_PREPARED = 1,  /**< Entrada guardada, ainda fora da hash table. */
+  SMR_TX_COMMITTED = 2, /**< Decisão de aplicar, ou registro de COMMIT. */
+  SMR_TX_ABORTED = 3    /**< Decisão de descartar, ou registro de ABORT. */
+} smr_tx_phase_t;
+
+/**
  * @brief Log local, em ordem crescente de @c log_index.
  *
  * @c count é o número de entradas seladas. @c last_applied é 0 enquanto
  * nenhuma foi instalada na hash table; a próxima entrada aplicável é
- * @c last_applied + 1. Buraco não avança @c last_applied.
+ * @c last_applied + 1. Buraco não avança @c last_applied. O slot
+ * @c prepared fica fora da tabela até @c smr_tx_finish em @c SMR_TX_COMMITTED.
  */
 typedef struct {
   smr_entry_t entries[SMR_LOG_MAX]; /**< Entradas em [0, count). O log é dono de @c stored.chunk_hashes. */
   size_t count;                     /**< Entradas seladas. */
   uint64_t last_applied;            /**< Maior índice já instalado, ou 0. */
   uint64_t checkpoint_index;        /**< Último índice marcado como checkpoint, ou 0. */
+  smr_tx_phase_t prepared_phase;    /**< @c SMR_TX_PREPARED enquanto o slot está ocupado. */
+  smr_entry_t prepared;             /**< Entrada do slot. O log é dono de @c stored.chunk_hashes. */
 } smr_log_t;
 
 /**
@@ -41,7 +57,7 @@ typedef struct {
 void smr_log_init(smr_log_t *log);
 
 /**
- * @brief Libera os hashes de cada entrada e deixa o log vazio.
+ * @brief Libera os hashes de cada entrada e do slot PREPARED, e deixa o log vazio.
  * @param log Log a esvaziar. Nulo é ignorado.
  */
 void smr_log_shutdown(smr_log_t *log);
@@ -77,6 +93,52 @@ int smr_entry_checksum_ok(const smr_entry_t *entry);
  *         nulo, checksum inválido, buraco ou tabela cheia.
  */
 int smr_log_apply(smr_log_t *log, metadata_table_t *table, const smr_entry_t *entry);
+
+/**
+ * @brief Aceita ou recusa uma entrada no slot @c PREPARED, sem escrever na tabela.
+ *
+ * O voto é YES quando o checksum fecha, @c log_index é @c last_applied + 1
+ * e o slot está livre. Qualquer outra situação é NO e o slot não muda.
+ * @param log Log que guarda o slot.
+ * @param entry Entrada já selada. O log copia o que precisar.
+ * @return 1 se a entrada ficou no slot, 0 se o voto é NO ou o argumento é nulo.
+ */
+int smr_prepare_vote(smr_log_t *log, const smr_entry_t *entry);
+
+/**
+ * @brief Fecha a rodada a partir dos votos.
+ *
+ * Sem participante (@p n == 0) a decisão é @c SMR_TX_COMMITTED: o coordenador
+ * sozinho comita. Um NO basta para @c SMR_TX_ABORTED.
+ * @param yes 1 para YES e 0 para NO. Pode ser nulo se @p n for 0.
+ * @param n Quantidade de votos remotos.
+ * @return @c SMR_TX_COMMITTED ou @c SMR_TX_ABORTED.
+ */
+smr_tx_phase_t smr_tx_decide_votes(const int *yes, size_t n);
+
+/**
+ * @brief Decisão quando o coordenador some durante o @c PREPARE.
+ *
+ * Algum sobrevivente em @c SMR_TX_COMMITTED fecha em COMMIT. Sem nenhum
+ * COMMIT, inclusive lista vazia, a decisão é @c SMR_TX_ABORTED.
+ * @param phases Fase vista em cada sobrevivente. Nulo vale lista vazia.
+ * @param n Quantidade de fases.
+ * @return @c SMR_TX_COMMITTED ou @c SMR_TX_ABORTED.
+ */
+smr_tx_phase_t smr_tx_decide_recover(const smr_tx_phase_t *phases, size_t n);
+
+/**
+ * @brief Aplica o slot no COMMIT ou descarta no ABORT.
+ *
+ * @c SMR_TX_COMMITTED passa por @c smr_log_apply. Repetir o mesmo índice não
+ * muda @c version. Slot vazio no COMMIT é sucesso: não havia o que aplicar.
+ * @c SMR_TX_ABORTED libera o slot e não escreve na tabela.
+ * @param log Log com o slot.
+ * @param table Hash table do mesmo Super Peer.
+ * @param decision @c SMR_TX_COMMITTED ou @c SMR_TX_ABORTED.
+ * @return 1 em sucesso, 0 se argumento nulo, decisão desconhecida ou o apply falhar.
+ */
+int smr_tx_finish(smr_log_t *log, metadata_table_t *table, smr_tx_phase_t decision);
 
 /**
  * @brief Sela um @c STORE no log local ou encaminha ao coordenador.

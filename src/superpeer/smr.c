@@ -112,6 +112,9 @@ void smr_log_shutdown(smr_log_t *log) {
   for (i = 0; i < n; i++) {
     metadata_release(&log->entries[i].stored);
   }
+  if (log->prepared_phase == SMR_TX_PREPARED) {
+    metadata_release(&log->prepared.stored);
+  }
   memset(log, 0, sizeof *log);
 }
 
@@ -189,6 +192,95 @@ int smr_log_apply(smr_log_t *log, metadata_table_t *table, const smr_entry_t *en
          (unsigned long long)entry->log_index, op_label(entry->operation), entry->name,
          (unsigned long long)entry->log_index);
   fflush(stdout);
+  return 1;
+}
+
+static void prepared_clear(smr_log_t *log) {
+  if (!log) {
+    return;
+  }
+  if (log->prepared_phase == SMR_TX_PREPARED) {
+    metadata_release(&log->prepared.stored);
+  }
+  memset(&log->prepared, 0, sizeof log->prepared);
+  log->prepared_phase = SMR_TX_NONE;
+}
+
+int smr_prepare_vote(smr_log_t *log, const smr_entry_t *entry) {
+  smr_entry_t copy;
+
+  if (!log || !entry || entry->log_index == 0) {
+    return 0;
+  }
+  if (log->prepared_phase == SMR_TX_PREPARED) {
+    return 0;
+  }
+  if (entry->log_index != log->last_applied + 1 || log->count >= SMR_LOG_MAX) {
+    return 0;
+  }
+  if (!smr_entry_checksum_ok(entry)) {
+    return 0;
+  }
+  if (!entry_clone(&copy, entry)) {
+    return 0;
+  }
+  log->prepared = copy;
+  log->prepared_phase = SMR_TX_PREPARED;
+  return 1;
+}
+
+smr_tx_phase_t smr_tx_decide_votes(const int *yes, size_t n) {
+  size_t i;
+
+  if (n == 0) {
+    return SMR_TX_COMMITTED;
+  }
+  if (!yes) {
+    return SMR_TX_ABORTED;
+  }
+  for (i = 0; i < n; i++) {
+    if (!yes[i]) {
+      return SMR_TX_ABORTED;
+    }
+  }
+  return SMR_TX_COMMITTED;
+}
+
+smr_tx_phase_t smr_tx_decide_recover(const smr_tx_phase_t *phases, size_t n) {
+  size_t i;
+
+  if (!phases || n == 0) {
+    return SMR_TX_ABORTED;
+  }
+  for (i = 0; i < n; i++) {
+    if (phases[i] == SMR_TX_COMMITTED) {
+      return SMR_TX_COMMITTED;
+    }
+  }
+  return SMR_TX_ABORTED;
+}
+
+int smr_tx_finish(smr_log_t *log, metadata_table_t *table, smr_tx_phase_t decision) {
+  int ok;
+
+  if (!log || !table) {
+    return 0;
+  }
+  if (decision == SMR_TX_ABORTED) {
+    prepared_clear(log);
+    return 1;
+  }
+  if (decision != SMR_TX_COMMITTED) {
+    return 0;
+  }
+  if (log->prepared_phase != SMR_TX_PREPARED) {
+    return 1;
+  }
+  ok = smr_log_apply(log, table, &log->prepared);
+  prepared_clear(log);
+  if (!ok) {
+    return 0;
+  }
   return 1;
 }
 
