@@ -971,6 +971,8 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
     smr_ingest_append(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == PREPARE) {
     smr_ingest_prepare(sp, conn, &msg.header, in_buf, msg.header.pl_size);
+  } else if (msg.header.msg_type == COMMIT || msg.header.msg_type == ABORT) {
+    smr_ingest_decision(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == SNAPSHOT) {
     smr_ingest_snapshot(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == LOOKUP) {

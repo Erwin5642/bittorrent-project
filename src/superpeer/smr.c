@@ -229,9 +229,7 @@ int smr_log_apply(smr_log_t *log, metadata_table_t *table, const smr_entry_t *en
          (unsigned long long)entry->log_index, op_label(entry->operation), entry->name,
          (unsigned long long)entry->log_index);
   fflush(stdout);
-  /* TODO(contrato C6, Aluno 1): quem tem o superpeer_t chama lfu_invalidate
-     aqui, com smr_lock já solto, se o ponteiro não for nulo. O campo ainda
-     não existe. O Gossip não carrega metadata. */
+  /* Quem tem o superpeer_t chama lfu_invalidate depois de soltar smr_lock. */
   return 1;
 }
 
@@ -512,15 +510,59 @@ static int send_frame(int fd, const superpeer_t *sp, const pl_header *req, uint1
   return rc == NET_OK;
 }
 
+/* smr_lock já está solto. Tira o registro do cache e anuncia o nome instalado. */
+static void notify_applied(superpeer_t *sp, const uint8_t object_id[METADATA_OBJECT_ID_SIZE],
+                           const char *name) {
+  if (sp && sp->lfu_invalidate && object_id && !metadata_id_is_zero(object_id)) {
+    sp->lfu_invalidate(sp, object_id);
+  }
+  if (name && name[0] != '\0') {
+    printf("UPLOAD %s\n", name);
+    fflush(stdout);
+  }
+}
+
 static int finish_locked(superpeer_t *sp, smr_tx_phase_t decision) {
+  uint8_t object_id[METADATA_OBJECT_ID_SIZE];
+  char name[METADATA_FILENAME_MAX];
+  uint64_t before;
+  uint64_t after;
   int ok;
 
+  memset(object_id, 0, sizeof object_id);
+  name[0] = '\0';
   pthread_mutex_lock(&sp->metadata_lock);
   pthread_mutex_lock(&sp->smr_lock);
+  before = sp->smr.last_applied;
+  if (sp->smr.prepared_phase == SMR_TX_PREPARED) {
+    memcpy(object_id, sp->smr.prepared.object_id, METADATA_OBJECT_ID_SIZE);
+    memcpy(name, sp->smr.prepared.name, METADATA_FILENAME_MAX);
+    name[METADATA_FILENAME_MAX - 1] = '\0';
+  }
   ok = smr_tx_finish(&sp->smr, &sp->metadata, decision);
+  after = sp->smr.last_applied;
   pthread_mutex_unlock(&sp->smr_lock);
   pthread_mutex_unlock(&sp->metadata_lock);
+  if (ok && after > before) {
+    notify_applied(sp, object_id, name);
+  }
   return ok;
+}
+
+/* Pausa só no coordenador, entre o último YES e o COMMIT. Sem a variável, é zero. */
+static void pause_after_prepare(void) {
+  const char *env = getenv("BT_PAUSE_AFTER_PREPARE");
+  char *end = NULL;
+  unsigned long seconds;
+
+  if (!env || env[0] == '\0') {
+    return;
+  }
+  seconds = strtoul(env, &end, 10);
+  if (end == env || seconds == 0 || seconds > 3600UL) {
+    return;
+  }
+  sleep((unsigned int)seconds);
 }
 
 /* Quem chama segura two_pc_mu. O slot já está PREPARED. */
@@ -598,6 +640,9 @@ static int round_two_pc(superpeer_t *sp, const uint8_t *packed, size_t packed_le
   fflush(stdout);
 
   decision = smr_tx_decide_votes(votes, n_votes);
+  if (decision == SMR_TX_COMMITTED) {
+    pause_after_prepare();
+  }
   memcpy(decision_body, entry.transaction_id, SMR_TRSC_ID_SIZE);
   put_be64(decision_body + SMR_TRSC_ID_SIZE, entry.log_index);
   for (i = 0; i < count; i++) {
@@ -677,15 +722,30 @@ static int coordinator_endpoint(superpeer_t *sp, uint32_t *ipv4, uint16_t *port)
   return 1;
 }
 
-static void ist_sync(superpeer_t *sp) {
-  uint32_t ipv4 = 0;
-  uint16_t port = 0;
+static int apply_unlocked(superpeer_t *sp, const smr_entry_t *entry) {
+  uint64_t before;
+  uint64_t after;
+  int ok;
+
+  pthread_mutex_lock(&sp->metadata_lock);
+  pthread_mutex_lock(&sp->smr_lock);
+  before = sp->smr.last_applied;
+  ok = smr_log_apply(&sp->smr, &sp->metadata, entry);
+  after = sp->smr.last_applied;
+  pthread_mutex_unlock(&sp->smr_lock);
+  pthread_mutex_unlock(&sp->metadata_lock);
+  if (ok && after > before) {
+    notify_applied(sp, entry->object_id, entry->name);
+  }
+  return ok;
+}
+
+static void ist_from(superpeer_t *sp, const char *ip, uint16_t port) {
   uint64_t mine = 0;
   uint64_t checkpoint;
   uint64_t source_last;
   uint32_t missing;
   uint32_t i;
-  char ip[INET_ADDRSTRLEN];
   uint8_t req[SNAPSHOT_REQ_LEN];
   uint8_t rep[64];
   uint8_t *frame = NULL;
@@ -694,9 +754,10 @@ static void ist_sync(superpeer_t *sp) {
   msg_t msg;
   int fd = -1;
   int attempt;
+  int synced = 1;
   const size_t cap = (size_t)LOG_APPEND_PREFIX + METADATA_PAYLOAD_MAX;
 
-  if (!coordinator_endpoint(sp, &ipv4, &port) || !inet_ntop(AF_INET, &ipv4, ip, sizeof ip)) {
+  if (!sp || !ip || port == 0) {
     return;
   }
   pthread_mutex_lock(&sp->smr_lock);
@@ -745,6 +806,8 @@ static void ist_sync(superpeer_t *sp) {
   printf("checkpoint LogIndex %llu\n", (unsigned long long)checkpoint);
   printf("version %llu -> %llu\n", (unsigned long long)mine, (unsigned long long)source_last);
   if (missing > 0) {
+    printf("versions missing\n");
+    printf("receive logs\n");
     printf("STATE_TRANSFER\n");
   }
   fflush(stdout);
@@ -760,24 +823,38 @@ static void ist_sync(superpeer_t *sp) {
 
     msg = simple_recv(fd, body, (uint32_t)cap);
     if (msg.status != NET_OK || msg.header.msg_type != STATE_TRANSFER) {
+      synced = 0;
       break;
     }
     memset(&entry, 0, sizeof entry);
     if (!log_append_unpack(&entry, body, msg.header.pl_size)) {
+      synced = 0;
       break;
     }
-    pthread_mutex_lock(&sp->metadata_lock);
-    pthread_mutex_lock(&sp->smr_lock);
-    applied = smr_log_apply(&sp->smr, &sp->metadata, &entry);
-    pthread_mutex_unlock(&sp->smr_lock);
-    pthread_mutex_unlock(&sp->metadata_lock);
+    applied = apply_unlocked(sp, &entry);
     metadata_release(&entry.stored);
     if (!applied) {
+      synced = 0;
       break;
     }
   }
   free(body);
   net_close(fd);
+  if (missing > 0 && synced) {
+    printf("READY\n");
+    fflush(stdout);
+  }
+}
+
+static void ist_sync(superpeer_t *sp) {
+  uint32_t ipv4 = 0;
+  uint16_t port = 0;
+  char ip[INET_ADDRSTRLEN];
+
+  if (!coordinator_endpoint(sp, &ipv4, &port) || !inet_ntop(AF_INET, &ipv4, ip, sizeof ip)) {
+    return;
+  }
+  ist_from(sp, ip, port);
 }
 
 static int put_object_id(const char *name, const uint8_t *value, size_t value_len,
@@ -916,11 +993,7 @@ static int forward_proposal(superpeer_t *sp, const member_t *coord, smr_op_t op,
     free(reply_buf);
     return ok;
   }
-  pthread_mutex_lock(&sp->metadata_lock);
-  pthread_mutex_lock(&sp->smr_lock);
-  ok = smr_log_apply(&sp->smr, &sp->metadata, &sealed);
-  pthread_mutex_unlock(&sp->smr_lock);
-  pthread_mutex_unlock(&sp->metadata_lock);
+  ok = apply_unlocked(sp, &sealed);
   metadata_release(&sealed.stored);
 
   if (fd >= 0) {
@@ -977,6 +1050,156 @@ int smr_propose_put(struct superpeer *sp, const char *name, const uint8_t *value
   return propose(sp, SMR_OP_PUT, name, object_id, NULL);
 }
 
+static int peer_last_applied(superpeer_t *sp, const char *ip, uint16_t port, uint64_t *out) {
+  uint64_t mine;
+  uint8_t req[SNAPSHOT_REQ_LEN];
+  uint8_t rep[64];
+  uint8_t *frame;
+  pl_header hdr;
+  msg_t msg;
+  int fd;
+  int ok = 0;
+
+  pthread_mutex_lock(&sp->smr_lock);
+  mine = sp->smr.last_applied;
+  pthread_mutex_unlock(&sp->smr_lock);
+  req[0] = 1;
+  put_be64(req + 1, mine);
+  fd = net_connect(ip, port);
+  if (fd < 0) {
+    return 0;
+  }
+  frame = malloc(HEADER_SIZE + SNAPSHOT_REQ_LEN);
+  memset(&hdr, 0, sizeof hdr);
+  hdr.protocol_ver = PROTOCOL_VER;
+  hdr.msg_type = SNAPSHOT;
+  hdr.time = (uint64_t)time(NULL);
+  hdr.pl_size = SNAPSHOT_REQ_LEN;
+  memcpy(hdr.src_node, sp->self_id.bytes, NODE_ID_SIZE);
+  if (frame && simple_send(fd, frame, req, SNAPSHOT_REQ_LEN, &hdr) == NET_OK) {
+    msg = simple_recv(fd, rep, sizeof rep);
+    if (msg.status == NET_OK && msg.header.msg_type == SNAPSHOT && msg.header.pl_size >= SNAPSHOT_REP_LEN &&
+        rep[0] == 2) {
+      *out = get_be64(rep + 9);
+      ok = 1;
+    }
+  }
+  free(frame);
+  net_close(fd);
+  return ok;
+}
+
+static void copy_live_peers(superpeer_t *sp, member_t *out, size_t *count) {
+  size_t i;
+
+  *count = 0;
+  pthread_mutex_lock(&sp->members_lock);
+  for (i = 0; i < sp->members.count; i++) {
+    member_t *m = &sp->members.entries[i];
+
+    if (m->node_type != SUPERPEER || m->state == MEMBER_FAILED || m->state == MEMBER_REMOVED ||
+        m->state == MEMBER_SUSPECT) {
+      continue;
+    }
+    if (node_id_cmp(&m->id, &sp->self_id) == 0 || endpoint_is_self(sp, m->ipv4, m->port)) {
+      continue;
+    }
+    out[(*count)++] = *m;
+  }
+  pthread_mutex_unlock(&sp->members_lock);
+}
+
+/* Se algum vivo já aplicou mais longe, puxa o trecho. Senão não imprime IST. */
+static void catch_up_peers(superpeer_t *sp) {
+  member_t targets[MEMBER_TABLE_MAX_SIZE];
+  size_t count = 0;
+  size_t i;
+  uint64_t mine;
+  uint64_t best;
+  char best_ip[INET_ADDRSTRLEN];
+  uint16_t best_port = 0;
+
+  pthread_mutex_lock(&sp->smr_lock);
+  mine = sp->smr.last_applied;
+  pthread_mutex_unlock(&sp->smr_lock);
+  best = mine;
+  copy_live_peers(sp, targets, &count);
+  for (i = 0; i < count; i++) {
+    char ip[INET_ADDRSTRLEN];
+    uint64_t last = 0;
+
+    if (!inet_ntop(AF_INET, &targets[i].ipv4, ip, sizeof ip)) {
+      continue;
+    }
+    if (!peer_last_applied(sp, ip, targets[i].port, &last) || last <= best) {
+      continue;
+    }
+    best = last;
+    snprintf(best_ip, sizeof best_ip, "%s", ip);
+    best_port = targets[i].port;
+  }
+  if (best_port != 0 && best > mine) {
+    ist_from(sp, best_ip, best_port);
+  }
+}
+
+static void broadcast_abort(superpeer_t *sp, const uint8_t tid[SMR_TRSC_ID_SIZE], uint64_t index) {
+  member_t targets[MEMBER_TABLE_MAX_SIZE];
+  uint8_t body[DECISION_WIRE];
+  size_t count = 0;
+  size_t i;
+
+  memcpy(body, tid, SMR_TRSC_ID_SIZE);
+  put_be64(body + SMR_TRSC_ID_SIZE, index);
+  copy_live_peers(sp, targets, &count);
+  for (i = 0; i < count; i++) {
+    char ip[INET_ADDRSTRLEN];
+    uint8_t reply[128];
+    msg_t msg;
+    int fd;
+
+    if (!inet_ntop(AF_INET, &targets[i].ipv4, ip, sizeof ip)) {
+      continue;
+    }
+    fd = net_connect(ip, targets[i].port);
+    if (fd < 0) {
+      continue;
+    }
+    if (send_frame(fd, sp, NULL, ABORT, body, DECISION_WIRE)) {
+      msg = simple_recv(fd, reply, sizeof reply);
+      (void)msg;
+    }
+    net_close(fd);
+  }
+}
+
+/* O processo morto levou o slot. Sem COMMIT nos vivos, a rodada aborta. */
+static void recover_prepared(superpeer_t *sp) {
+  uint8_t tid[SMR_TRSC_ID_SIZE];
+  uint64_t index = 0;
+  int pending = 0;
+
+  catch_up_peers(sp);
+  pthread_mutex_lock(&sp->metadata_lock);
+  pthread_mutex_lock(&sp->smr_lock);
+  if (sp->smr.prepared_phase == SMR_TX_PREPARED && sp->smr.prepared.log_index <= sp->smr.last_applied) {
+    prepared_clear(&sp->smr);
+  } else if (sp->smr.prepared_phase == SMR_TX_PREPARED) {
+    pending = 1;
+    memcpy(tid, sp->smr.prepared.transaction_id, SMR_TRSC_ID_SIZE);
+    index = sp->smr.prepared.log_index;
+  }
+  pthread_mutex_unlock(&sp->smr_lock);
+  pthread_mutex_unlock(&sp->metadata_lock);
+  if (!pending) {
+    return;
+  }
+  broadcast_abort(sp, tid, index);
+  finish_locked(sp, SMR_TX_ABORTED);
+  printf("ABORT\n");
+  fflush(stdout);
+}
+
 void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, int i_am_leader) {
   uint64_t idx;
 
@@ -999,6 +1222,7 @@ void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, i
     ist_sync(sp);
     return;
   }
+  recover_prepared(sp);
   pthread_mutex_lock(&sp->smr_lock);
   sp->smr.checkpoint_index = sp->smr.last_applied;
   idx = sp->smr.checkpoint_index;
@@ -1062,11 +1286,7 @@ int smr_ingest_append(struct superpeer *sp, int conn, const pl_header *hdr, cons
     return ok;
   }
 
-  pthread_mutex_lock(&sp->metadata_lock);
-  pthread_mutex_lock(&sp->smr_lock);
-  ok = smr_log_apply(&sp->smr, &sp->metadata, &entry);
-  pthread_mutex_unlock(&sp->smr_lock);
-  pthread_mutex_unlock(&sp->metadata_lock);
+  ok = apply_unlocked(sp, &entry);
   metadata_release(&entry.stored);
   if (!ok) {
     send_error(conn, hdr, &sp->self_id, 1, "LOG_APPEND rejected");
@@ -1079,22 +1299,38 @@ int smr_ingest_append(struct superpeer *sp, int conn, const pl_header *hdr, cons
 
 static int close_slot(superpeer_t *sp, const uint8_t *payload, size_t len, int commit) {
   uint8_t tid[SMR_TRSC_ID_SIZE];
+  uint8_t object_id[METADATA_OBJECT_ID_SIZE];
+  char name[METADATA_FILENAME_MAX];
   uint64_t index;
+  uint64_t before;
+  uint64_t after;
   int match;
   int ok;
 
   if (!payload || len != DECISION_WIRE) {
     return 0;
   }
+  memset(object_id, 0, sizeof object_id);
+  name[0] = '\0';
   memcpy(tid, payload, SMR_TRSC_ID_SIZE);
   index = get_be64(payload + SMR_TRSC_ID_SIZE);
   pthread_mutex_lock(&sp->metadata_lock);
   pthread_mutex_lock(&sp->smr_lock);
+  before = sp->smr.last_applied;
   match = sp->smr.prepared_phase == SMR_TX_PREPARED && sp->smr.prepared.log_index == index &&
           memcmp(sp->smr.prepared.transaction_id, tid, SMR_TRSC_ID_SIZE) == 0;
+  if (match) {
+    memcpy(object_id, sp->smr.prepared.object_id, METADATA_OBJECT_ID_SIZE);
+    memcpy(name, sp->smr.prepared.name, METADATA_FILENAME_MAX);
+    name[METADATA_FILENAME_MAX - 1] = '\0';
+  }
   ok = match && smr_tx_finish(&sp->smr, &sp->metadata, commit ? SMR_TX_COMMITTED : SMR_TX_ABORTED);
+  after = sp->smr.last_applied;
   pthread_mutex_unlock(&sp->smr_lock);
   pthread_mutex_unlock(&sp->metadata_lock);
+  if (ok && after > before) {
+    notify_applied(sp, object_id, name);
+  }
   return ok;
 }
 
@@ -1122,6 +1358,8 @@ int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr, con
   pthread_mutex_unlock(&sp->metadata_lock);
   metadata_release(&entry.stored);
   if (!ok) {
+    printf("NO\n");
+    fflush(stdout);
     send_error(conn, hdr, &sp->self_id, 1, "NO");
     return 0;
   }
@@ -1130,6 +1368,8 @@ int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr, con
   if (send_ack(conn, hdr, &sp->self_id, &ack) != NET_OK) {
     return 0;
   }
+  printf("YES\n");
+  fflush(stdout);
 
   msg = recv_message(conn, next, sizeof next, NULL, 0);
   if (msg.status != NET_OK || (msg.header.msg_type != COMMIT && msg.header.msg_type != ABORT)) {
@@ -1143,6 +1383,26 @@ int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr, con
   memset(&ack, 0, sizeof ack);
   memcpy(ack.node_id, sp->self_id.bytes, NODE_ID_SIZE);
   return send_ack(conn, &msg.header, &sp->self_id, &ack) == NET_OK;
+}
+
+int smr_ingest_decision(struct superpeer *sp, int conn, const pl_header *hdr, const uint8_t *payload,
+                        size_t len) {
+  ack_t ack;
+  int commit;
+
+  if (!sp || !hdr || !payload || conn < 0 || (hdr->msg_type != COMMIT && hdr->msg_type != ABORT)) {
+    return 0;
+  }
+  commit = hdr->msg_type == COMMIT;
+  if (!close_slot(sp, payload, len, commit)) {
+    send_error(conn, hdr, &sp->self_id, 1, "decision rejected");
+    return 0;
+  }
+  printf("%s\n", commit ? "COMMIT" : "ABORT");
+  fflush(stdout);
+  memset(&ack, 0, sizeof ack);
+  memcpy(ack.node_id, sp->self_id.bytes, NODE_ID_SIZE);
+  return send_ack(conn, hdr, &sp->self_id, &ack) == NET_OK;
 }
 
 int smr_ingest_snapshot(struct superpeer *sp, int conn, const pl_header *hdr, const uint8_t *payload,
