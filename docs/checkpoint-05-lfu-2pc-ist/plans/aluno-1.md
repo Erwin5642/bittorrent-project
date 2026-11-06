@@ -243,7 +243,8 @@ Peer recebe o upload e serve o download.
 
 Os chunks vão para os mesmos Super Peers que o Chord usaria para a chave: o
 dono do ObjectID e os sucessores dele, até `ReplicationFactor = 3` nós
-distintos. Quem faz a réplica é o cliente, com RPCs que já existem:
+distintos. Quem faz a réplica é o cliente, com RPCs que já existem, num módulo
+novo do cliente, `src/peer/replica.c` e `include/peer/replica.h`:
 
 ```text
 upload:
@@ -257,8 +258,18 @@ Com isso, qualquer Super Peer acha os chunks sem saber quem recebeu o upload. O
 Super Peer não ganha lógica nova de encaminhamento, nem tipo novo no enum. Num
 Super Peer sozinho (C1, C2), a lista é ele mesmo.
 
-Um nó da lista que não responde é pulado. O upload termina se o `STORE` teve
-`ACK` e ao menos uma cópia de cada chunk foi gravada. O cliente imprime quantas
+O `STORE` vem antes dos chunks porque o Super Peer recusa um chunk cujo
+registro ainda não está na hash table dele: ele confere o índice e o tamanho do
+chunk contra o metadado.
+
+O `ACK` do `STORE` garante o `COMMIT` no Super Peer de entrada, mas o `COMMIT`
+pode chegar às outras réplicas um pouco depois, e até lá elas recusam o chunk.
+Por isso o cliente testa a conexão com cada réplica antes de enviar. Conexão
+recusada quer dizer que o nó está fora, e ele é pulado na hora. Um nó vivo que
+recusa os chunks recebe novas tentativas, até 10 vezes com 200 ms de intervalo.
+
+O upload termina se o `STORE` teve `ACK` e ao menos uma réplica confirmou todos
+os chunks. O cliente imprime quantas
 réplicas cada arquivo ficou tendo. Na fase 4 do harness de fluxo o SP2 está
 morto e ainda pode aparecer na lista de sucessores; a conexão é recusada, o nó
 é pulado, e o upload sai com 0.
@@ -268,19 +279,24 @@ morto e ainda pode aparecer na lista de sucessores; a conexão é recusada, o n�
 ```text
 download nome:
     LOOKUP nome → metadado                        (pode vir do cache)
-    FIND_SUCCESSOR(ObjectID) + GET_SUCCESSORS → [dono, s1, s2]
+    FIND_SUCCESSOR(ObjectID) + GET_SUCCESSORS → [dono, s1, s2, entrada]
     busca os chunks no primeiro da lista, em paralelo
-    um DOWNLOAD_REQ sem resposta em DOWNLOAD_TIMEOUT_SEC
+    um DOWNLOAD_REQ sem resposta em REPLICA_TIMEOUT_SEC
         → próximo da lista; refaz só os chunks que faltam
     SHA-256 de cada chunk e do arquivo, como hoje
 ```
+
+O Super Peer de entrada vai no fim da lista quando ainda não está nela. Ele é
+a última tentativa, para os chunks gravados antes da réplica existir, quando
+ficavam só em quem recebia o upload.
 
 O `LOOKUP` continua indo ao Super Peer da `--port`. Mandá-lo ao dono faria
 outro Super Peer registrar `cache hit`, o que a fase 6 do harness de fluxo
 proíbe. As linhas `Download completed` e `SHA-256 verified` continuam saindo
 exatamente assim, porque a fase 7 as confere.
 
-O timeout é `SO_RCVTIMEO` no socket do `DOWNLOAD_REQ`. O contrato C8 pede que
+O timeout, `REPLICA_TIMEOUT_SEC` (3 s), é `SO_RCVTIMEO` e `SO_SNDTIMEO` no
+socket do `DOWNLOAD_REQ` e nas RPCs `FIND_SUCCESSOR` e `GET_SUCCESSORS`. O contrato C8 pede que
 um timeout do cliente fique acima da pausa `BT_PAUSE_AFTER_PREPARE`. Essa pausa
 fica no `STORE` do upload, e o timeout novo fica só no `DOWNLOAD_REQ`, então os
 dois não se cruzam. Ainda assim, o valor é combinado com o Aluno 2.
@@ -301,17 +317,22 @@ Transfer documento_a.pdf REPLICATED 3
 
 | Estado | Upload | Download |
 | --- | --- | --- |
-| `CREATED` | metadado e chunks gerados | metadado obtido no `LOOKUP` |
-| `QUEUED` | chunks distribuídos entre os workers | idem |
-| `STARTED` | primeira conexão aberta | idem |
-| `TRANSFERRING` | chunks indo para as réplicas | chunks chegando |
-| `VERIFYING` | `ACK` do `STORE` conferido | SHA-256 dos chunks e do arquivo |
-| `FINISHED` | todos os chunks gravados em ao menos um nó | arquivo gravado |
-| `REPLICATED` | quantas réplicas cada chunk tem | — |
+| `CREATED` | metadado e chunks gerados localmente | metadado obtido no `LOOKUP` |
+| `QUEUED` | `STORE` confirmado com `ACK`; chunks na fila | réplicas descobertas |
+| `STARTED` | réplicas descobertas | início da busca dos chunks |
+| `TRANSFERRING` | chunks indo para as réplicas | chunks chegando, com SHA-256 de cada um |
+| `VERIFYING` | conferência dos chunks em cada réplica | SHA-256 do arquivo inteiro |
+| `FINISHED` | ao menos uma réplica com todos os chunks | arquivo gravado |
+| `REPLICATED` | quantas réplicas ficaram com todos os chunks | — |
+
+No upload, a ordem dos estados segue a ordem `STORE` → chunks explicada em
+*Réplica dos chunks*.
 
 Nenhuma linha do cliente usa `FAILED`, `IST`, `PREPARE`, `COMMIT` ou
-`checkpoint`, que são palavras procuradas pelos `grep` do C3, do C4 e do C5. Um
-erro sai como `Transfer <nome> erro: <motivo>`.
+`checkpoint`, que são palavras procuradas pelos `grep` do C3, do C4 e do C5. A
+troca de nó sai como `Transfer <nome> replica <ip:porta> sem resposta; pulando`
+no upload e `…; seguindo para <ip:porta>` no download. Os erros que encerram o
+comando vão para a saída de erro, com o prefixo `upload:` ou `download:`.
 
 ### Lookup Cache (opcional)
 
@@ -335,8 +356,9 @@ Sem socket:
 
 ### Transferência
 
-- Um caso em `tests/peer/test_download.c` para a escolha da próxima réplica:
-  com a primeira fora, os chunks restantes saem da segunda.
+- Em `tests/peer/test_download.c`, a montagem da lista de réplicas
+  (`replica_merge`): o dono primeiro, os sucessores sem repetição, o teto de
+  3 nós e o Super Peer de entrada no fim.
 - Ensaio manual com os três Super Peers do `tests/config/c5.conf`: upload,
   `kill -9` no dono do ObjectID e download completo a partir de outra réplica,
   com o SHA-256 conferido.
