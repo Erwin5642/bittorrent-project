@@ -11,3 +11,7 @@ tests/data/
 
 # Rascunho do agente (spec e ledger). Não versionar.
 .agent-work/
+
+# Logs e arquivos gerados pelo harness de fluxo (tests/flow/run.sh).
+tests/flow/logs/
+tests/flow/out/
