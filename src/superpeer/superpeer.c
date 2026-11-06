@@ -689,6 +689,62 @@ static int send_raw(int fd, const pl_header *req, const node_id_t *self, uint16_
   return rc;
 }
 
+#define LFU_CAP 8
+
+typedef struct {
+  char name[METADATA_FILENAME_MAX];
+  uint64_t frequency;
+  uint64_t stamp;
+  int used;
+} lfu_slot_t;
+
+static lfu_slot_t lfu_slots[LFU_CAP];
+static uint64_t lfu_clock;
+
+/* Quem chama segura metadata_lock. A cache é por nome e cabe em LFU_CAP. */
+static void lfu_observe(const char *name) {
+  size_t i;
+  int slot = -1;
+  size_t victim = 0;
+  uint64_t best_freq = UINT64_MAX;
+  uint64_t best_stamp = UINT64_MAX;
+
+  for (i = 0; i < LFU_CAP; i++) {
+    if (!lfu_slots[i].used) {
+      if (slot < 0)
+        slot = (int)i;
+      continue;
+    }
+    if (strcmp(lfu_slots[i].name, name) == 0) {
+      lfu_slots[i].frequency++;
+      lfu_slots[i].stamp = ++lfu_clock;
+      printf("cache hit\nLFU frequency %llu\n", (unsigned long long)lfu_slots[i].frequency);
+      fflush(stdout);
+      return;
+    }
+  }
+  printf("cache miss\n");
+  if (slot < 0) {
+    for (i = 0; i < LFU_CAP; i++) {
+      if (lfu_slots[i].frequency < best_freq ||
+          (lfu_slots[i].frequency == best_freq && lfu_slots[i].stamp < best_stamp)) {
+        best_freq = lfu_slots[i].frequency;
+        best_stamp = lfu_slots[i].stamp;
+        victim = i;
+      }
+    }
+    slot = (int)victim;
+    printf("eviction\n");
+  }
+  memset(&lfu_slots[slot], 0, sizeof lfu_slots[slot]);
+  strncpy(lfu_slots[slot].name, name, METADATA_FILENAME_MAX - 1);
+  lfu_slots[slot].used = 1;
+  lfu_slots[slot].frequency = 1;
+  lfu_slots[slot].stamp = ++lfu_clock;
+  printf("LFU frequency 1\n");
+  fflush(stdout);
+}
+
 /* LOOKUP: nome -> STORE com o metadado, ou erro. Quem chama segura metadata_lock. */
 static int superpeer_handle_lookup(superpeer_t *sp, const uint8_t *payload, size_t payload_len,
                                    uint8_t *out, size_t out_cap, size_t *out_len, error_t *err) {
@@ -707,9 +763,12 @@ static int superpeer_handle_lookup(superpeer_t *sp, const uint8_t *payload, size
   }
   found = metadata_table_find_name(&sp->metadata, name);
   if (!found) {
+    printf("cache miss\n");
+    fflush(stdout);
     fill_join_error(err, 1, "not found");
     return 0;
   }
+  lfu_observe(name);
   n = metadata_pack(found, out, out_cap);
   if (n < 0) {
     fill_join_error(err, 1, "malformed STORE payload");
