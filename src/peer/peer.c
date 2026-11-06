@@ -12,6 +12,7 @@
 #include "../../include/common/config.h"
 #include "../../include/peer/upload.h"
 #include "../../include/peer/download.h"
+#include "../../include/peer/replica.h"
 
 #include <getopt.h>
 #include <signal.h>
@@ -188,13 +189,53 @@ static void peer_identity(peer_t *self, node_config_t *cfg, const char *conf) {
 		node_id_generate(0, 0, &uuid, &self->node_id);
 }
 
+/* Estado da transferência (CP5), uma linha por transição. */
+static void transfer_state(const char *name, const char *state) {
+	printf("Transfer %s %s\n", name, state);
+	fflush(stdout);
+}
+
+static void pause_ms(long ms) {
+	struct timespec ts;
+
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (ms % 1000) * 1000000L;
+	nanosleep(&ts, NULL);
+}
+
+/* Tentativas de enviar os chunks a uma réplica viva. O COMMIT do STORE pode
+   chegar a ela depois do ACK, e até lá ela recusa o chunk. */
+#define UPLOAD_REPLICA_TRIES 10
+#define UPLOAD_REPLICA_PAUSE_MS 200
+
+/* Envia todos os chunks a uma réplica. 1 se ela confirmou todos. */
+static int send_to_replica(const peer_t *self, const file_metadata_t *meta,
+                           const replica_endpoint_t *r) {
+	int fd = net_connect(r->host, r->port);
+	int i;
+
+	if (fd < 0)
+		return 0; /* conexão recusada: o nó está fora, não adianta insistir */
+	net_close(fd);
+	for (i = 0; i < UPLOAD_REPLICA_TRIES; i++) {
+		if (upload_send_chunks(r->host, r->port, &self->node_id, meta, STORAGE_ROOT))
+			return 1;
+		pause_ms(UPLOAD_REPLICA_PAUSE_MS);
+	}
+	return 0;
+}
+
 /* Subcomando: --cmd upload --file <arquivo> */
 static int cmd_upload(const char *file, const char *conf, const char *host_opt, long port_opt) {
 	peer_t self;
 	node_config_t cfg;
 	file_metadata_t meta;
+	replica_endpoint_t holders[REPLICATION_FACTOR];
 	char host[INET_ADDRSTRLEN];
 	uint16_t port = 0;
+	size_t holder_count;
+	size_t replicas = 0;
+	size_t h;
 
 	if (!file) {
 		fprintf(stderr, "upload: faltou --file <arquivo>\n");
@@ -212,12 +253,39 @@ static int cmd_upload(const char *file, const char *conf, const char *host_opt, 
 	}
 
 	upload_print_report(&meta);
-	if (!store_to_superpeer(&self, host, port, &meta) ||
-	    !upload_send_chunks(host, port, &self.node_id, &meta, STORAGE_ROOT)) {
+	transfer_state(meta.filename, "CREATED");
+	/* O Super Peer só aceita chunk de um registro que já está na tabela dele,
+	   então o STORE vem antes dos chunks. */
+	if (!store_to_superpeer(&self, host, port, &meta)) {
 		fprintf(stderr, "upload: falha ao publicar %s\n", file);
 		metadata_release(&meta);
 		return 1;
 	}
+	transfer_state(meta.filename, "QUEUED");
+
+	/* Réplicas: dono do ObjectID no anel e sucessores (CP5). */
+	holder_count = replica_holders(host, port, &self.node_id, meta.object_id, 0, holders,
+	                               REPLICATION_FACTOR);
+	transfer_state(meta.filename, "STARTED");
+	transfer_state(meta.filename, "TRANSFERRING");
+	for (h = 0; h < holder_count; h++) {
+		if (send_to_replica(&self, &meta, &holders[h])) {
+			replicas++;
+		} else {
+			printf("Transfer %s replica %s:%u sem resposta; pulando\n", meta.filename,
+			       holders[h].host, (unsigned)holders[h].port);
+			fflush(stdout);
+		}
+	}
+	transfer_state(meta.filename, "VERIFYING");
+	if (replicas == 0) {
+		fprintf(stderr, "upload: nenhuma replica confirmou os chunks de %s\n", file);
+		metadata_release(&meta);
+		return 1;
+	}
+	transfer_state(meta.filename, "FINISHED");
+	printf("Transfer %s REPLICATED %zu\n", meta.filename, replicas);
+	fflush(stdout);
 	metadata_release(&meta);
 	return 0;
 }
