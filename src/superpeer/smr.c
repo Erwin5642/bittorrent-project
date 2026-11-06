@@ -284,6 +284,34 @@ int smr_tx_finish(smr_log_t *log, metadata_table_t *table, smr_tx_phase_t decisi
   return 1;
 }
 
+int smr_ist_offer(const smr_log_t *log, uint64_t requester_last, smr_ist_offer_t *offer,
+                  const smr_entry_t **missing, size_t missing_cap) {
+  size_t i;
+  size_t n;
+  size_t total = 0;
+
+  if (!log || !offer) {
+    return 0;
+  }
+  n = log->count;
+  if (n > SMR_LOG_MAX) {
+    n = SMR_LOG_MAX;
+  }
+  offer->checkpoint_index = log->checkpoint_index;
+  offer->source_last_applied = log->last_applied;
+  for (i = 0; i < n; i++) {
+    if (log->entries[i].log_index <= requester_last) {
+      continue;
+    }
+    if (missing && total < missing_cap) {
+      missing[total] = &log->entries[i];
+    }
+    total++;
+  }
+  offer->missing_count = total;
+  return 1;
+}
+
 static int find_member(superpeer_t *sp, const node_id_t *id, member_t *out) {
   size_t i;
 
