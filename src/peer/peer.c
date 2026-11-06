@@ -94,9 +94,11 @@ int peer_init(peer_t* peer, const char *conf_path){
 #define PEER_CONF "config/peer1.conf"
 #define STORAGE_ROOT "storage"
 
-/* Host/porta do Super Peer: --port explicito, senao bootstrap[0] do .conf. */
+/* Host/porta do Super Peer: --port explicito, senao o primeiro bootstrap que conectar. */
 static int peer_endpoint(const node_config_t *cfg, const char *host_opt, long port_opt,
                          char *host_out, size_t host_cap, uint16_t *port_out) {
+	int i;
+
 	if (port_opt != 0) {
 		snprintf(host_out, host_cap, "%s", host_opt ? host_opt : "127.0.0.1");
 		*port_out = (uint16_t)port_opt;
@@ -104,10 +106,23 @@ static int peer_endpoint(const node_config_t *cfg, const char *host_opt, long po
 	}
 	if (!cfg || cfg->bootstrap_count <= 0)
 		return 0;
-	if (!inet_ntop(AF_INET, &cfg->bootstrap[0].ipv4, host_out, host_cap))
-		return 0;
-	*port_out = cfg->bootstrap[0].port;
-	return *port_out != 0;
+	for (i = 0; i < cfg->bootstrap_count; i++) {
+		char ip[INET_ADDRSTRLEN];
+		int fd;
+
+		if (cfg->bootstrap[i].port == 0)
+			continue;
+		if (!inet_ntop(AF_INET, &cfg->bootstrap[i].ipv4, ip, sizeof ip))
+			continue;
+		fd = net_connect(ip, cfg->bootstrap[i].port);
+		if (fd < 0)
+			continue;
+		net_close(fd);
+		snprintf(host_out, host_cap, "%s", ip);
+		*port_out = cfg->bootstrap[i].port;
+		return 1;
+	}
+	return 0;
 }
 
 /* Registra o metadado no Super Peer. 1 so com ACK. */
@@ -396,6 +411,47 @@ static void print_lookup_node(const chord_peer_t *node) {
 	printf("%s:%u\n", ip, (unsigned)node->port);
 }
 
+/* Subcomando: --cmd lookup --name <arquivo> --host <ip> --port <porta> */
+static int cmd_lookup_name(const char *name, const char *host, long port) {
+	peer_t self;
+	node_config_t cfg;
+	uint8_t payload[METADATA_FILENAME_MAX];
+	uint8_t frame[HEADER_SIZE + METADATA_FILENAME_MAX];
+	uint8_t reply[METADATA_PAYLOAD_MAX];
+	pl_header hdr;
+	msg_t r;
+	ssize_t n;
+	int fd;
+
+	if (!name || !host || port < 1 || port > 65535) {
+		fprintf(stderr, "lookup: faltou --name, --host e --port\n");
+		return 1;
+	}
+	peer_identity(&self, &cfg, NULL);
+	n = lookup_pack(name, payload, sizeof payload);
+	if (n < 0)
+		return 1;
+	fd = net_connect(host, (uint16_t)port);
+	if (fd < 0)
+		return 1;
+	memset(&hdr, 0, sizeof hdr);
+	hdr.protocol_ver = PROTOCOL_VER;
+	hdr.msg_type = LOOKUP;
+	hdr.time = (uint64_t)time(NULL);
+	hdr.pl_size = (uint32_t)n;
+	memcpy(hdr.src_node, self.node_id.bytes, NODE_ID_SIZE);
+	if (simple_send(fd, frame, payload, (uint32_t)n, &hdr) != NET_OK) {
+		net_close(fd);
+		return 1;
+	}
+	r = simple_recv(fd, reply, sizeof reply);
+	net_close(fd);
+	if (r.status != NET_OK)
+		return 1;
+	printf("LOOKUP %s\n", name);
+	return r.header.msg_type == STORE ? 0 : 1;
+}
+
 /* Subcomando: --cmd lookup --object-id <64 hex> --host <ip> --port <porta> */
 static int cmd_lookup(const char *object_id, const char *host, long port) {
 	uint8_t key[NODE_ID_SIZE];
@@ -517,8 +573,11 @@ int main(int argc, char* argv[]){
         return cmd_upload(file, conf, host, port);
     if (strcmp(cmd, "download") == 0)
         return cmd_download(name, output, conf, host, port);
-    if (strcmp(cmd, "lookup") == 0)
+    if (strcmp(cmd, "lookup") == 0) {
+        if (name && !object_id)
+            return cmd_lookup_name(name, host, port);
         return cmd_lookup(object_id, host, port);
+    }
     if (strcmp(cmd, "put") == 0)
         return cmd_put(name, value, conf, host, port);
     if (strcmp(cmd, "state") == 0)
