@@ -5,6 +5,7 @@
 #include "common/node.h"
 #include "common/protocol.h"
 #include "superpeer/chord.h"
+#include "superpeer/lfu.h"
 #include "superpeer/metadata.h"
 #include "superpeer/smr.h"
 
@@ -82,6 +83,12 @@ typedef struct {
   size_t count;                            /**< Quantidade de entradas válidas. */
 } member_table_t;
 
+/** Capacidade da região Metadata Cache do LFU (CP5). */
+#define LFU_METADATA_CAP 8
+
+/** Tamanho de @c superpeer_t.storage_root, incluindo o NUL. */
+#define SUPERPEER_STORAGE_PATH_MAX 64
+
 /**
  * @brief Estado do processo Super Peer.
  */
@@ -104,9 +111,11 @@ typedef struct superpeer {
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
   pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
   pthread_mutex_t smr_lock;          /**< Serializa o log. Não segurar durante connect ou send. */
-  /* TODO(contrato C6, Aluno 1): void (*lfu_invalidate)(struct superpeer *sp,
-     const uint8_t object_id[32]). NULL até o LFU existir. O Aluno 2 chama
-     depois de cada apply de COMMIT e de IST, com smr_lock já solto. */
+  lfu_cache_t metadata_cache;        /**< Região Metadata Cache do LFU: nome -> registro empacotado (CP5). */
+  /** Invalida o registro de um ObjectID no cache (contrato C6). O Aluno 2 chama
+      depois de cada apply de COMMIT e de IST, com @c smr_lock já solto. */
+  void (*lfu_invalidate)(struct superpeer *sp, const uint8_t object_id[METADATA_OBJECT_ID_SIZE]);
+  char storage_root[SUPERPEER_STORAGE_PATH_MAX]; /**< Pasta dos chunks deste Super Peer: `data/storage/<porta>` (CP5). */
 } superpeer_t;
 
 /**
@@ -240,7 +249,7 @@ int superpeer_handle_store(superpeer_t *sp, const pl_header *hdr, const uint8_t 
  *       DOWNLOAD_REQ → DOWNLOAD_REP/ERROR; CLOSEST_PRECEDING, GET_PREDECESSOR
  *       e GET_SUCCESSORS → o mesmo tipo, lido do anel; NOTIFY → ACK.
  *       FIND_SUCCESSOR → o caminho até o dono do ObjectID, no mesmo tipo.
- *       Chunks ficam em `data/storage`.
+ *       Chunks ficam em `data/storage/<porta>`.
  *       Versão inválida ou @c NET_CLOSED: fecha o fd sem responder.
  *       Outros tipos: ERROR 3.
  *       Sem limite de conexões simultâneas nem timeout de I/O (MVP). Se

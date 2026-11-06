@@ -80,14 +80,16 @@ static int store_meta(const file_metadata_t *meta) {
   return r.status == NET_OK && r.header.msg_type == ACK;
 }
 
-static void cleanup_object(const uint8_t object_id[NODE_ID_SIZE]) {
+/* Os chunks ficam na pasta deste Super Peer, data/storage/<porta>. */
+static void cleanup_object(const char *root, const uint8_t object_id[NODE_ID_SIZE]) {
   char path[STORAGE_PATH_MAX];
   char dir[STORAGE_PATH_MAX];
 
-  if (storage_chunk_path(path, sizeof path, "data/storage", object_id, 0))
+  if (storage_chunk_path(path, sizeof path, root, object_id, 0))
     unlink(path);
-  if (storage_object_dir(dir, sizeof dir, "data/storage", object_id))
+  if (storage_object_dir(dir, sizeof dir, root, object_id))
     rmdir(dir);
+  rmdir(root);
 }
 
 static void test_service(void) {
@@ -165,7 +167,7 @@ static void test_service(void) {
          "LOOKUP do nome publicado");
   expect(r.status == NET_OK && r.header.msg_type == STORE, "LOOKUP responde STORE");
 
-  cleanup_object(meta.object_id);
+  cleanup_object(sp.storage_root, meta.object_id);
   metadata_release(&meta);
   free(reply);
   unlink(TEST_CONF);

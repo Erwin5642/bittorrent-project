@@ -13,6 +13,7 @@
 
 #include "../../include/peer/download.h"
 #include "../../include/peer/file_pipeline.h"
+#include "../../include/peer/replica.h"
 #include "../../include/peer/storage.h"
 #include "../../include/common/compression.h"
 #include <netinet/in.h>
@@ -177,6 +178,7 @@ typedef struct {
 	const node_id_t *self;
 	const file_metadata_t *meta;
 	uint8_t *out_buf;
+	uint8_t *done;     /* done[i] = 1 quando o chunk i chegou e conferiu */
 	uint32_t start;
 	uint32_t workers;
 	int ok;
@@ -210,6 +212,8 @@ static int fetch_one_chunk(const fetch_task_t *t, uint32_t index) {
 	fd = net_connect(t->host, t->port);
 	if (fd < 0)
 		goto done;
+	/* Réplica que não responde no prazo é trocada pela próxima (CP5). */
+	replica_set_timeout(fd, REPLICA_TIMEOUT_SEC);
 
 	memset(&hdr, 0, sizeof hdr);
 	hdr.protocol_ver = PROTOCOL_VER;
@@ -250,17 +254,22 @@ static void *fetch_worker(void *arg) {
 	uint32_t i;
 
 	for (i = t->start; i < t->meta->chunk_count; i += t->workers) {
+		if (t->done[i])
+			continue;
+		/* Para no primeiro erro: os chunks que sobraram vão para a próxima réplica. */
 		if (!fetch_one_chunk(t, i)) {
 			t->ok = 0;
 			return NULL;
 		}
+		t->done[i] = 1;
 	}
 	t->ok = 1;
 	return NULL;
 }
 
+/* Busca numa réplica os chunks com done[i] == 0. 1 se todos ficaram prontos. */
 static int fetch_chunks(const char *host, uint16_t port, const node_id_t *self,
-                        const file_metadata_t *meta, uint8_t *out_buf) {
+                        const file_metadata_t *meta, uint8_t *out_buf, uint8_t *done) {
 	pthread_t th[TRANSFER_WORKERS];
 	fetch_task_t task[TRANSFER_WORKERS];
 	uint32_t nw;
@@ -270,7 +279,7 @@ static int fetch_chunks(const char *host, uint16_t port, const node_id_t *self,
 
 	nw = meta->chunk_count < TRANSFER_WORKERS ? meta->chunk_count : TRANSFER_WORKERS;
 	for (w = 0; w < nw; w++) {
-		task[w] = (fetch_task_t){host, port, self, meta, out_buf, w, nw, 0};
+		task[w] = (fetch_task_t){host, port, self, meta, out_buf, done, w, nw, 0};
 		if (pthread_create(&th[w], NULL, fetch_worker, &task[w]) != 0) {
 			all_ok = 0;
 			break;
@@ -319,10 +328,30 @@ static int lookup_meta(const char *host, uint16_t port, const node_id_t *self,
 	return ok;
 }
 
+/* Estado da transferência (CP5): CREATED, QUEUED, STARTED, TRANSFERRING, VERIFYING, FINISHED. */
+static void transfer_state(const char *name, const char *state) {
+	printf("Transfer %s %s\n", name, state);
+	fflush(stdout);
+}
+
+static int all_done(const uint8_t *done, uint32_t count) {
+	uint32_t i;
+
+	for (i = 0; i < count; i++) {
+		if (!done[i])
+			return 0;
+	}
+	return 1;
+}
+
 int download_from_superpeer(const char *host, uint16_t port, const node_id_t *self,
                             const char *name, const char *output) {
 	file_metadata_t meta;
+	replica_endpoint_t holders[REPLICATION_FACTOR + 1];
+	size_t holder_count;
+	size_t h;
 	uint8_t *out_buf = NULL;
+	uint8_t *done = NULL;
 	uint8_t digest[NODE_ID_SIZE];
 	int rc = 0;
 
@@ -334,25 +363,50 @@ int download_from_superpeer(const char *host, uint16_t port, const node_id_t *se
 		fprintf(stderr, "download: LOOKUP de '%s' falhou\n", name);
 		return 0;
 	}
+	transfer_state(name, "CREATED");
 
 	if (meta.size == 0) {
+		transfer_state(name, "VERIFYING");
 		if (sha256(NULL, 0, digest) && memcmp(digest, meta.object_id, NODE_ID_SIZE) == 0 &&
 		    write_file(output, NULL, 0)) {
 			printf("Download completed\n");
 			printf("SHA-256 verified\n");
+			transfer_state(name, "FINISHED");
 			rc = 1;
 		}
 		metadata_release(&meta);
 		return rc;
 	}
 
+	/* Dono do ObjectID e sucessores; o Super Peer de entrada fica por último,
+	   para os chunks gravados antes da réplica existir. */
+	holder_count = replica_holders(host, port, self, meta.object_id, 1, holders,
+	                               sizeof holders / sizeof holders[0]);
+	transfer_state(name, "QUEUED");
+
 	out_buf = malloc((size_t)meta.size);
-	if (!out_buf)
+	done = calloc(meta.chunk_count, 1);
+	if (!out_buf || !done)
 		goto done;
-	if (!fetch_chunks(host, port, self, &meta, out_buf)) {
+
+	transfer_state(name, "STARTED");
+	transfer_state(name, "TRANSFERRING");
+	for (h = 0; h < holder_count && !all_done(done, meta.chunk_count); h++) {
+		if (fetch_chunks(holders[h].host, holders[h].port, self, &meta, out_buf, done))
+			break;
+		if (!all_done(done, meta.chunk_count) && h + 1 < holder_count) {
+			printf("Transfer %s replica %s:%u sem resposta; seguindo para %s:%u\n", name,
+			       holders[h].host, (unsigned)holders[h].port, holders[h + 1].host,
+			       (unsigned)holders[h + 1].port);
+			fflush(stdout);
+		}
+	}
+	if (!all_done(done, meta.chunk_count)) {
 		fprintf(stderr, "download: falha na transferencia/verificacao dos chunks\n");
 		goto done;
 	}
+
+	transfer_state(name, "VERIFYING");
 	if (!sha256(out_buf, (size_t)meta.size, digest) ||
 	    memcmp(digest, meta.object_id, NODE_ID_SIZE) != 0) {
 		fprintf(stderr, "download: SHA-256 do arquivo nao confere com o ObjectID\n");
@@ -365,10 +419,11 @@ int download_from_superpeer(const char *host, uint16_t port, const node_id_t *se
 
 	printf("Download completed\n");
 	printf("SHA-256 verified\n");
-	fflush(stdout);
+	transfer_state(name, "FINISHED");
 	rc = 1;
 
 done:
+	free(done);
 	free(out_buf);
 	metadata_release(&meta);
 	return rc;

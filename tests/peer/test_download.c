@@ -3,6 +3,7 @@
 #include "common/protocol.h"
 #include "peer/download.h"
 #include "peer/file_pipeline.h"
+#include "peer/replica.h"
 #include "peer/storage.h"
 #include "peer/upload.h"
 #include "utils/test_utils.h"
@@ -10,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <arpa/inet.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -166,10 +168,56 @@ static void test_missing(void) {
   rmdir(root);
 }
 
+static chord_peer_t ring_node(uint16_t port) {
+  chord_peer_t p;
+
+  memset(&p, 0, sizeof p);
+  inet_pton(AF_INET, "127.0.0.1", &p.ipv4);
+  p.port = port;
+  return p;
+}
+
+/**
+ * @brief Lista de réplicas (CP5): dono, sucessores sem repetição, teto e entrada no fim.
+ */
+static void test_replica_merge(void) {
+  replica_endpoint_t out[REPLICATION_FACTOR + 1];
+  chord_peer_t owner = ring_node(5102);
+  chord_peer_t succ[3];
+  size_t n;
+
+  succ[0] = ring_node(5103);
+  succ[1] = ring_node(5101);
+  succ[2] = ring_node(5104);
+  n = replica_merge(&owner, succ, 3, REPLICATION_FACTOR, NULL, 0, out, REPLICATION_FACTOR + 1);
+  expect(n == 3, "dono + 2 sucessores, no teto de 3");
+  expect(out[0].port == 5102 && out[1].port == 5103 && out[2].port == 5101,
+         "ordem: dono, depois os sucessores");
+  expect(strcmp(out[0].host, "127.0.0.1") == 0, "endereço em texto");
+
+  succ[0] = ring_node(5102);
+  succ[1] = ring_node(5102);
+  n = replica_merge(&owner, succ, 2, REPLICATION_FACTOR, NULL, 0, out, REPLICATION_FACTOR + 1);
+  expect(n == 1, "anel de um nó: o dono aparece uma vez");
+
+  succ[0] = ring_node(5103);
+  n = replica_merge(&owner, succ, 1, REPLICATION_FACTOR, "127.0.0.1", 5101, out,
+                    REPLICATION_FACTOR + 1);
+  expect(n == 3 && out[2].port == 5101, "entrada vai no fim quando não é réplica");
+  n = replica_merge(&owner, succ, 1, REPLICATION_FACTOR, "127.0.0.1", 5103, out,
+                    REPLICATION_FACTOR + 1);
+  expect(n == 2, "entrada que já é réplica não repete");
+
+  n = replica_merge(NULL, NULL, 0, REPLICATION_FACTOR, "127.0.0.1", 55101, out,
+                    REPLICATION_FACTOR + 1);
+  expect(n == 1 && out[0].port == 55101, "sem anel: só a entrada");
+}
+
 int main(void) {
   test_single_chunk();
   test_two_chunks();
   test_corruption();
   test_missing();
+  test_replica_merge();
   return test_report();
 }

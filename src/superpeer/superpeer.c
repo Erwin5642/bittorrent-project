@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
@@ -320,6 +321,15 @@ void member_table_print(const member_table_t *table) {
   }
 }
 
+/* Contrato C6: o registro de um ObjectID mudou (COMMIT ou IST); o cache o esquece.
+   Não imprime nada: roda logo depois do apply, entre as linhas do 2PC. */
+static void superpeer_lfu_invalidate(struct superpeer *sp,
+                                     const uint8_t object_id[METADATA_OBJECT_ID_SIZE]) {
+  if (sp) {
+    lfu_invalidate_object(&sp->metadata_cache, object_id);
+  }
+}
+
 int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const char *name) {
   node_config_t cfg;
   member_t self;
@@ -364,6 +374,13 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
   }
 
   sp->cfg = cfg;
+
+  /* Cada Super Peer grava os próprios chunks (CP5). Com uma pasta só, todos os
+     processos da mesma máquina leriam os chunks uns dos outros e a réplica
+     não seria observável. storage_put_chunk cria só o último nível. */
+  snprintf(sp->storage_root, sizeof sp->storage_root, "data/storage/%u", (unsigned)cfg.port);
+  mkdir("data", 0777);
+  mkdir("data/storage", 0777);
 
   if (!node_id_from_endpoint(cfg.ipv4, cfg.port, &sp->self_id)) {
     fprintf(stderr, "superpeer_init: failed to generate NodeID\n");
@@ -442,8 +459,20 @@ int superpeer_init(superpeer_t *sp, const char *conf_path, uint16_t port, const 
     pthread_mutex_destroy(&sp->members_lock);
     return 0;
   }
+  if (!lfu_init(&sp->metadata_cache, LFU_METADATA_CAP)) {
+    fprintf(stderr, "superpeer_init: failed to init LFU cache\n");
+    chord_shutdown(&sp->chord);
+    pthread_mutex_destroy(&sp->smr_lock);
+    smr_log_shutdown(&sp->smr);
+    pthread_mutex_destroy(&sp->coord_lock);
+    pthread_mutex_destroy(&sp->metadata_lock);
+    pthread_mutex_destroy(&sp->members_lock);
+    return 0;
+  }
+  sp->lfu_invalidate = superpeer_lfu_invalidate;
   fd = net_listen(cfg.port);
   if (fd < 0) {
+    lfu_destroy(&sp->metadata_cache);
     chord_shutdown(&sp->chord);
     pthread_mutex_destroy(&sp->smr_lock);
     smr_log_shutdown(&sp->smr);
@@ -651,7 +680,6 @@ static void sleep_ms(unsigned ms) {
 }
 
 /** Chunks ficam no storage do processo; o peer só guarda o metadado na tabela. */
-#define SUPERPEER_STORAGE_ROOT "data/storage"
 
 typedef struct {
   superpeer_t *sp;
@@ -689,68 +717,14 @@ static int send_raw(int fd, const pl_header *req, const node_id_t *self, uint16_
   return rc;
 }
 
-#define LFU_CAP 8
-
-typedef struct {
-  char name[METADATA_FILENAME_MAX];
-  uint64_t frequency;
-  uint64_t stamp;
-  int used;
-} lfu_slot_t;
-
-static lfu_slot_t lfu_slots[LFU_CAP];
-static uint64_t lfu_clock;
-
-/* Quem chama segura metadata_lock. A cache é por nome e cabe em LFU_CAP. */
-static void lfu_observe(const char *name) {
-  size_t i;
-  int slot = -1;
-  size_t victim = 0;
-  uint64_t best_freq = UINT64_MAX;
-  uint64_t best_stamp = UINT64_MAX;
-
-  for (i = 0; i < LFU_CAP; i++) {
-    if (!lfu_slots[i].used) {
-      if (slot < 0)
-        slot = (int)i;
-      continue;
-    }
-    if (strcmp(lfu_slots[i].name, name) == 0) {
-      lfu_slots[i].frequency++;
-      lfu_slots[i].stamp = ++lfu_clock;
-      printf("cache hit\nLFU frequency %llu\n", (unsigned long long)lfu_slots[i].frequency);
-      fflush(stdout);
-      return;
-    }
-  }
-  printf("cache miss\n");
-  if (slot < 0) {
-    for (i = 0; i < LFU_CAP; i++) {
-      if (lfu_slots[i].frequency < best_freq ||
-          (lfu_slots[i].frequency == best_freq && lfu_slots[i].stamp < best_stamp)) {
-        best_freq = lfu_slots[i].frequency;
-        best_stamp = lfu_slots[i].stamp;
-        victim = i;
-      }
-    }
-    slot = (int)victim;
-    printf("eviction\n");
-  }
-  memset(&lfu_slots[slot], 0, sizeof lfu_slots[slot]);
-  strncpy(lfu_slots[slot].name, name, METADATA_FILENAME_MAX - 1);
-  lfu_slots[slot].used = 1;
-  lfu_slots[slot].frequency = 1;
-  lfu_slots[slot].stamp = ++lfu_clock;
-  printf("LFU frequency 1\n");
-  fflush(stdout);
-}
-
 /* LOOKUP: nome -> STORE com o metadado, ou erro. Quem chama segura metadata_lock. */
 static int superpeer_handle_lookup(superpeer_t *sp, const uint8_t *payload, size_t payload_len,
                                    uint8_t *out, size_t out_cap, size_t *out_len, error_t *err) {
   char name[METADATA_FILENAME_MAX];
   const file_metadata_t *found;
   ssize_t n;
+  uint64_t freq = 0;
+  int evicted = 0;
 
   if (!sp || !payload || !out || !out_len || !err) {
     if (err)
@@ -761,20 +735,32 @@ static int superpeer_handle_lookup(superpeer_t *sp, const uint8_t *payload, size
     fill_join_error(err, 1, "malformed LOOKUP payload");
     return 0;
   }
+  /* Metadata Cache (CP5): o hit responde com o registro guardado, sem ler a hash table. */
+  if (lfu_get(&sp->metadata_cache, name, out, out_cap, out_len, &freq) == 1) {
+    printf("cache hit\nLFU frequency %llu\n", (unsigned long long)freq);
+    fflush(stdout);
+    return 1;
+  }
+  printf("cache miss\n");
+  fflush(stdout);
   found = metadata_table_find_name(&sp->metadata, name);
   if (!found) {
-    printf("cache miss\n");
-    fflush(stdout);
     fill_join_error(err, 1, "not found");
     return 0;
   }
-  lfu_observe(name);
   n = metadata_pack(found, out, out_cap);
   if (n < 0) {
     fill_join_error(err, 1, "malformed STORE payload");
     return 0;
   }
   *out_len = (size_t)n;
+  if (lfu_put(&sp->metadata_cache, name, found->object_id, out, (size_t)n, &evicted)) {
+    if (evicted) {
+      printf("eviction\n");
+    }
+    printf("LFU frequency 1\n");
+    fflush(stdout);
+  }
   return 1;
 }
 
@@ -803,7 +789,7 @@ static int superpeer_handle_chunk_put(superpeer_t *sp, const pl_header *hdr, con
     fill_join_error(err, 1, "not found");
     return 0;
   }
-  if (!storage_put_chunk(SUPERPEER_STORAGE_ROOT, object_id, index, comp, comp_len)) {
+  if (!storage_put_chunk(sp->storage_root, object_id, index, comp, comp_len)) {
     fill_join_error(err, 1, "storage write failed");
     return 0;
   }
@@ -839,7 +825,7 @@ static int superpeer_handle_chunk_get(superpeer_t *sp, const uint8_t *payload, s
     fill_join_error(err, 1, "not found");
     return 0;
   }
-  stored = storage_chunk_size(SUPERPEER_STORAGE_ROOT, object_id, index);
+  stored = storage_chunk_size(sp->storage_root, object_id, index);
   if (stored <= 0) {
     fill_join_error(err, 1, "chunk missing");
     return 0;
@@ -849,7 +835,7 @@ static int superpeer_handle_chunk_get(superpeer_t *sp, const uint8_t *payload, s
     fill_join_error(err, 1, "out of memory");
     return 0;
   }
-  if (!storage_get_chunk(SUPERPEER_STORAGE_ROOT, object_id, index, comp, (size_t)stored, &comp_len) ||
+  if (!storage_get_chunk(sp->storage_root, object_id, index, comp, (size_t)stored, &comp_len) ||
       comp_len != (size_t)stored || comp_len > UINT32_MAX) {
     fill_join_error(err, 1, "chunk missing");
     goto done;
@@ -1184,6 +1170,9 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
     size_t len = 0;
     size_t i;
     int w;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    uint64_t evictions = 0;
 
     if (msg.header.pl_size != 0) {
       send_error(conn, &msg.header, &sp->self_id, 1, "malformed GET_STATE payload");
@@ -1194,6 +1183,16 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
                    (unsigned long long)sp->smr.last_applied, sp->metadata.count);
       if (w > 0 && (size_t)w < sizeof text) {
         len = (size_t)w;
+      }
+      /* Métricas do Metadata Cache (CP5): a taxa de miss é o complemento. */
+      lfu_stats(&sp->metadata_cache, &hits, &misses, &evictions);
+      w = snprintf(text + len, sizeof text - len,
+                   "Cache hits %llu misses %llu evictions %llu hit rate %llu%%\n",
+                   (unsigned long long)hits, (unsigned long long)misses,
+                   (unsigned long long)evictions,
+                   (unsigned long long)(hits + misses ? hits * 100 / (hits + misses) : 0));
+      if (w > 0 && (size_t)w < sizeof text - len) {
+        len += (size_t)w;
       }
       for (i = 0; i < METADATA_TABLE_MAX; i++) {
         const metadata_slot_t *slot = &sp->metadata.slots[i];

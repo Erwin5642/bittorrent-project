@@ -20,6 +20,7 @@ SUPERPEER_OBJ = $(OBJ_DIR)/superpeer/superpeer.o
 METADATA_OBJ = $(OBJ_DIR)/superpeer/metadata.o
 SMR_OBJ = $(OBJ_DIR)/superpeer/smr.o
 CHORD_OBJ = $(OBJ_DIR)/superpeer/chord.o
+LFU_OBJ = $(OBJ_DIR)/superpeer/lfu.o
 SUPERPEER_MAIN_OBJ = $(OBJ_DIR)/superpeer/main.o
 PEER_MAIN_OBJ = $(OBJ_DIR)/peer/peer.o
 
@@ -27,6 +28,7 @@ PEER_MAIN_OBJ = $(OBJ_DIR)/peer/peer.o
 PEER_OBJS = \
 	$(OBJ_DIR)/peer/upload.o \
 	$(OBJ_DIR)/peer/download.o \
+	$(OBJ_DIR)/peer/replica.o \
 	$(OBJ_DIR)/peer/file_pipeline.o \
 	$(OBJ_DIR)/peer/storage.o
 
@@ -48,12 +50,13 @@ TEST_CHORD_RING = $(BIN_DIR)/test_chord_ring
 TEST_SMR = $(BIN_DIR)/test_smr
 TEST_2PC = $(BIN_DIR)/test_2pc
 TEST_IST = $(BIN_DIR)/test_ist
+TEST_LFU = $(BIN_DIR)/test_lfu
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC) $(TEST_IST)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC) $(TEST_IST) $(TEST_LFU)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
@@ -70,6 +73,7 @@ test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMP
 	$(TEST_SMR)
 	$(TEST_2PC)
 	$(TEST_IST)
+	$(TEST_LFU)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -78,7 +82,7 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 # Ligação
-$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(SUPERPEER_MAIN_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) | $(BIN_DIR)
+$(BIN_DIR)/superpeer: $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(LFU_OBJ) $(SUPERPEER_MAIN_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/node: $(BIN_DIR)/superpeer | $(BIN_DIR)
@@ -93,7 +97,7 @@ $(BIN_DIR)/test_node: tests/common/test_node.c $(OBJ_DIR)/common/node.o $(TEST_U
 $(BIN_DIR)/test_config: tests/common/test_config.c $(OBJ_DIR)/common/config.o $(TEST_UTILS_OBJ) | $(BIN_DIR) $(OBJ_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(BIN_DIR)/test_superpeer: tests/superpeer/test_superpeer.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/test_superpeer: tests/superpeer/test_superpeer.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(LFU_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_metadata: tests/superpeer/test_metadata.c $(METADATA_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
@@ -111,19 +115,19 @@ $(BIN_DIR)/test_storage: tests/peer/test_storage.c $(OBJ_DIR)/peer/storage.o $(T
 $(BIN_DIR)/test_upload: tests/peer/test_upload.c $(OBJ_DIR)/peer/upload.o $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/peer/storage.o $(OBJ_DIR)/common/compression.o $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/test_download: tests/peer/test_download.c $(OBJ_DIR)/peer/download.o $(OBJ_DIR)/peer/upload.o $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/peer/storage.o $(OBJ_DIR)/common/compression.o $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/test_download: tests/peer/test_download.c $(OBJ_DIR)/peer/download.o $(OBJ_DIR)/peer/replica.o $(OBJ_DIR)/peer/upload.o $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/peer/storage.o $(OBJ_DIR)/common/compression.o $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_chunk_wire: tests/common/test_chunk_wire.c $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(OBJ_DIR)/common/node.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/test_chunk_service: tests/superpeer/test_chunk_service.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/test_chunk_service: tests/superpeer/test_chunk_service.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(LFU_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_chord: tests/superpeer/test_chord.c $(CHORD_OBJ) $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/test_chord_ring: tests/superpeer/test_chord_ring.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+$(BIN_DIR)/test_chord_ring: tests/superpeer/test_chord_ring.c $(SUPERPEER_OBJ) $(METADATA_OBJ) $(SMR_OBJ) $(CHORD_OBJ) $(LFU_OBJ) $(OBJ_DIR)/peer/storage.o $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_smr: tests/superpeer/test_smr.c $(METADATA_OBJ) $(SMR_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
@@ -133,6 +137,9 @@ $(BIN_DIR)/test_2pc: tests/superpeer/test_2pc.c $(METADATA_OBJ) $(SMR_OBJ) $(COM
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_ist: tests/superpeer/test_ist.c $(METADATA_OBJ) $(SMR_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_lfu: tests/superpeer/test_lfu.c $(LFU_OBJ) $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compila tests/foo.c em obj/tests/foo.o
