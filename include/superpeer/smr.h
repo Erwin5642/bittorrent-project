@@ -199,8 +199,8 @@ int smr_propose_put(struct superpeer *sp, const char *name, const uint8_t *value
 /**
  * @brief Avisa o log de quem passou a ser o coordenador.
  *
- * O novo líder marca checkpoint no último índice aplicado. O líder antigo
- * que volta como seguidor não reaplica o próprio log.
+ * O novo líder marca o último índice aplicado e segue. Um seguidor pede
+ * @c SNAPSHOT ao coordenador e aplica só o que vier em @c STATE_TRANSFER.
  * @param sp Super Peer que recebeu ou venceu o @c COORDINATOR.
  * @param coordinator_id NodeID anunciado. Nulo limpa o coordenador conhecido.
  * @param i_am_leader 1 se @p coordinator_id é este processo.
@@ -210,7 +210,7 @@ void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, i
 /**
  * @brief Trata um @c LOG_APPEND já lido do socket.
  *
- * Índice 0 é proposta: o coordenador sela, replica e responde outro
+ * Índice 0 é proposta: o coordenador sela, roda 2PC e responde outro
  * @c LOG_APPEND no mesmo socket. Índice a partir de 1 é réplica: aplica e
  * responde @c ACK. Quem chama não segura o lock do log.
  * @param sp Super Peer que recebeu a mensagem.
@@ -223,5 +223,38 @@ void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, i
  */
 int smr_ingest_append(struct superpeer *sp, int conn, const pl_header *hdr,
                       const uint8_t *payload, size_t len);
+
+/**
+ * @brief Vota um @c PREPARE e, no mesmo socket, espera @c COMMIT ou @c ABORT.
+ *
+ * YES no fio é @c ACK. NO é @c ERROR. O corpo é o de @c log_append_pack.
+ * A hash table só muda se o @c COMMIT seguinte fechar o slot.
+ * @param sp Participante.
+ * @param conn Socket que já entregou o @c PREPARE. A decisão é lida aqui.
+ * @param hdr Header do @c PREPARE.
+ * @param payload Corpo, sem o header.
+ * @param len Tamanho de @p payload.
+ * @return 1 se o voto foi YES e a decisão foi aplicada, 0 se o voto foi NO
+ *         ou a decisão foi recusada.
+ */
+int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr,
+                       const uint8_t *payload, size_t len);
+
+/**
+ * @brief Responde um pedido @c SNAPSHOT e em seguida manda o delta.
+ *
+ * O pedido tem 9 bytes: kind 1 e `last_applied` em big-endian. A resposta
+ * tem 21 bytes: kind 2, `checkpoint_index`, `last_applied` da origem e
+ * `missing_count`. Cada entrada que falta sai como @c STATE_TRANSFER no
+ * mesmo socket. `missing_count` 0 não manda @c STATE_TRANSFER.
+ * @param sp Quem oferece o log.
+ * @param conn Socket do pedido.
+ * @param hdr Header do @c SNAPSHOT.
+ * @param payload Corpo do pedido.
+ * @param len Tamanho de @p payload.
+ * @return 1 se a resposta saiu, 0 se o pedido foi recusado.
+ */
+int smr_ingest_snapshot(struct superpeer *sp, int conn, const pl_header *hdr,
+                        const uint8_t *payload, size_t len);
 
 #endif

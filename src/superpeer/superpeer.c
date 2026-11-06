@@ -924,6 +924,10 @@ static void handle_connection(superpeer_t *sp, int conn, struct sockaddr_in peer
     }
   } else if (msg.header.msg_type == LOG_APPEND) {
     smr_ingest_append(sp, conn, &msg.header, in_buf, msg.header.pl_size);
+  } else if (msg.header.msg_type == PREPARE) {
+    smr_ingest_prepare(sp, conn, &msg.header, in_buf, msg.header.pl_size);
+  } else if (msg.header.msg_type == SNAPSHOT) {
+    smr_ingest_snapshot(sp, conn, &msg.header, in_buf, msg.header.pl_size);
   } else if (msg.header.msg_type == LOOKUP) {
     uint8_t reply[METADATA_PAYLOAD_MAX];
     size_t reply_len = 0;

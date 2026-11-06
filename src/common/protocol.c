@@ -46,8 +46,8 @@ static const int32_t payload_sizes[MSG_TYPE_MAX] = {
 	[DOWNLOAD_REQ] = DOWNLOAD_REQ_WIRE_SIZE,
 	[DOWNLOAD_REP] = -1,
 	[PREPARE] = -1,
-	[COMMIT] = -1,
-	[ABORT] = -1,
+	[COMMIT] = 24,
+	[ABORT] = 24,
 	[HEARTBEAT] = 0,
 	[GOSSIP] = -1,
 	[ELECTION] = 0,
@@ -99,7 +99,7 @@ static const char *const type_names[MSG_TYPE_MAX] = {
 /* STORE/LOOKUP/DOWNLOAD_* e LOG_APPEND carregam bytes crus e podem passar do teto de controle. */
 static int payload_is_data(uint16_t t) {
 	return t == STORE || t == LOOKUP || t == DOWNLOAD_REQ || t == DOWNLOAD_REP ||
-	       t == LOG_APPEND;
+	       t == LOG_APPEND || t == PREPARE || t == STATE_TRANSFER;
 }
 
 static uint32_t payload_ceiling(uint16_t t) {
@@ -1170,6 +1170,11 @@ int deserialize_message(const uint8_t *in_buf, const size_t buf_len, pl_header *
     case DOWNLOAD_REQ:
     case DOWNLOAD_REP:
     case LOG_APPEND:
+    case PREPARE:
+    case COMMIT:
+    case ABORT:
+    case SNAPSHOT:
+    case STATE_TRANSFER:
     case CLOSEST_PRECEDING:
     case GET_PREDECESSOR:
     case GET_SUCCESSORS:
@@ -1203,9 +1208,9 @@ int send_message(const int fd, uint8_t *out_msg_buffer, const size_t buf_size,
  * Le o header, valida versao/tipo/pl_size, le o payload, confere o CRC32 e
  * desserializa para struct_payload. Devolve msg_t com header, payload e status.
  *
- * STORE/LOOKUP/DOWNLOAD_*, LOG_APPEND e GOSSIP sao lidos por inteiro e
- * devolvidos crus em in_msg_buffer. STATE_TRANSFER e SNAPSHOT continuam sem
- * leitura do corpo: o layout deles pertence ao checkpoint 5.
+ * STORE/LOOKUP/DOWNLOAD_*, LOG_APPEND, PREPARE, SNAPSHOT, STATE_TRANSFER e
+ * GOSSIP sao lidos por inteiro e devolvidos crus em in_msg_buffer.
+ * COMMIT e ABORT tem 24 bytes.
  */
 msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
                    void *struct_payload, size_t struct_size){
@@ -1235,10 +1240,6 @@ msg_t recv_message(int fd, uint8_t *in_msg_buffer, size_t in_buf_size,
 		fprintf(stderr, "recv_message # corrupted header");
 		return (msg_t){{0}, NULL, NET_ERROR};
 	}
-
-	/* Layout ainda indefinido (CP5): nao consome o corpo. */
-	if (message_type == STATE_TRANSFER || message_type == SNAPSHOT)
-		return (msg_t){msg_header, struct_payload, NET_OK};
 
 	if (payload_size > payload_ceiling(message_type) ||
 	    (payload_sizes[message_type] >= 0 &&
