@@ -21,17 +21,46 @@
 struct superpeer;
 
 /**
+ * @brief Fase local de uma transação do 2PC.
+ *
+ * O slot ocupa @c SMR_TX_PREPARED. @c SMR_TX_COMMITTED e @c SMR_TX_ABORTED
+ * são decisões: a hash table só muda na primeira.
+ */
+typedef enum {
+  SMR_TX_NONE = 0,      /**< Sem transação no slot. */
+  SMR_TX_PREPARED = 1,  /**< Entrada guardada, ainda fora da hash table. */
+  SMR_TX_COMMITTED = 2, /**< Decisão de aplicar, ou registro de COMMIT. */
+  SMR_TX_ABORTED = 3    /**< Decisão de descartar, ou registro de ABORT. */
+} smr_tx_phase_t;
+
+/**
+ * @brief Oferta do IST: marco de checkpoint e quantas entradas o pedinte não tem.
+ *
+ * O corpo são as entradas com @c log_index maior que o @c last_applied do
+ * pedinte. O formato no fio de @c SNAPSHOT e @c STATE_TRANSFER espera o
+ * contrato com o Aluno 1.
+ */
+typedef struct {
+  uint64_t checkpoint_index;    /**< Marco já gravado no log de origem. */
+  uint64_t source_last_applied; /**< @c last_applied de quem oferece. */
+  size_t missing_count;         /**< Entradas com índice acima do pedinte. */
+} smr_ist_offer_t;
+
+/**
  * @brief Log local, em ordem crescente de @c log_index.
  *
  * @c count é o número de entradas seladas. @c last_applied é 0 enquanto
  * nenhuma foi instalada na hash table; a próxima entrada aplicável é
- * @c last_applied + 1. Buraco não avança @c last_applied.
+ * @c last_applied + 1. Buraco não avança @c last_applied. O slot
+ * @c prepared fica fora da tabela até @c smr_tx_finish em @c SMR_TX_COMMITTED.
  */
 typedef struct {
   smr_entry_t entries[SMR_LOG_MAX]; /**< Entradas em [0, count). O log é dono de @c stored.chunk_hashes. */
   size_t count;                     /**< Entradas seladas. */
   uint64_t last_applied;            /**< Maior índice já instalado, ou 0. */
   uint64_t checkpoint_index;        /**< Último índice marcado como checkpoint, ou 0. */
+  smr_tx_phase_t prepared_phase;    /**< @c SMR_TX_PREPARED enquanto o slot está ocupado. */
+  smr_entry_t prepared;             /**< Entrada do slot. O log é dono de @c stored.chunk_hashes. */
 } smr_log_t;
 
 /**
@@ -41,7 +70,7 @@ typedef struct {
 void smr_log_init(smr_log_t *log);
 
 /**
- * @brief Libera os hashes de cada entrada e deixa o log vazio.
+ * @brief Libera os hashes de cada entrada e do slot PREPARED, e deixa o log vazio.
  * @param log Log a esvaziar. Nulo é ignorado.
  */
 void smr_log_shutdown(smr_log_t *log);
@@ -79,6 +108,68 @@ int smr_entry_checksum_ok(const smr_entry_t *entry);
 int smr_log_apply(smr_log_t *log, metadata_table_t *table, const smr_entry_t *entry);
 
 /**
+ * @brief Aceita ou recusa uma entrada no slot @c PREPARED, sem escrever na tabela.
+ *
+ * O voto é YES quando o checksum fecha, @c log_index é @c last_applied + 1
+ * e o slot está livre. Qualquer outra situação é NO e o slot não muda.
+ * @param log Log que guarda o slot.
+ * @param entry Entrada já selada. O log copia o que precisar.
+ * @return 1 se a entrada ficou no slot, 0 se o voto é NO ou o argumento é nulo.
+ */
+int smr_prepare_vote(smr_log_t *log, const smr_entry_t *entry);
+
+/**
+ * @brief Fecha a rodada a partir dos votos.
+ *
+ * Sem participante (@p n == 0) a decisão é @c SMR_TX_COMMITTED: o coordenador
+ * sozinho comita. Um NO basta para @c SMR_TX_ABORTED.
+ * @param yes 1 para YES e 0 para NO. Pode ser nulo se @p n for 0.
+ * @param n Quantidade de votos remotos.
+ * @return @c SMR_TX_COMMITTED ou @c SMR_TX_ABORTED.
+ */
+smr_tx_phase_t smr_tx_decide_votes(const int *yes, size_t n);
+
+/**
+ * @brief Decisão quando o coordenador some durante o @c PREPARE.
+ *
+ * Algum sobrevivente em @c SMR_TX_COMMITTED fecha em COMMIT. Sem nenhum
+ * COMMIT, inclusive lista vazia, a decisão é @c SMR_TX_ABORTED.
+ * @param phases Fase vista em cada sobrevivente. Nulo vale lista vazia.
+ * @param n Quantidade de fases.
+ * @return @c SMR_TX_COMMITTED ou @c SMR_TX_ABORTED.
+ */
+smr_tx_phase_t smr_tx_decide_recover(const smr_tx_phase_t *phases, size_t n);
+
+/**
+ * @brief Aplica o slot no COMMIT ou descarta no ABORT.
+ *
+ * @c SMR_TX_COMMITTED passa por @c smr_log_apply. Repetir o mesmo índice não
+ * muda @c version. Slot vazio no COMMIT é sucesso: não havia o que aplicar.
+ * @c SMR_TX_ABORTED libera o slot e não escreve na tabela.
+ * @param log Log com o slot.
+ * @param table Hash table do mesmo Super Peer.
+ * @param decision @c SMR_TX_COMMITTED ou @c SMR_TX_ABORTED.
+ * @return 1 em sucesso, 0 se argumento nulo, decisão desconhecida ou o apply falhar.
+ */
+int smr_tx_finish(smr_log_t *log, metadata_table_t *table, smr_tx_phase_t decision);
+
+/**
+ * @brief Lista as entradas do log estritamente posteriores a @p requester_last.
+ *
+ * Não inclui o slot @c PREPARED. @p missing recebe ponteiros para dentro de
+ * @p log, em ordem de @c log_index, até @p missing_cap. @c missing_count conta
+ * todas, mesmo quando o array não cabe.
+ * @param log Log de quem oferece o estado.
+ * @param requester_last Último índice que o pedinte já aplicou. 0 pede o log inteiro.
+ * @param offer Destino do marco e da contagem. O caller aloca.
+ * @param missing Destino dos ponteiros. Pode ser nulo se só a contagem importa.
+ * @param missing_cap Capacidade de @p missing.
+ * @return 1 em sucesso, 0 se @p log ou @p offer for nulo.
+ */
+int smr_ist_offer(const smr_log_t *log, uint64_t requester_last, smr_ist_offer_t *offer,
+                  const smr_entry_t **missing, size_t missing_cap);
+
+/**
  * @brief Sela um @c STORE no log local ou encaminha ao coordenador.
  *
  * Sem coordenador conhecido, aplica na tabela local. Com coordenador remoto,
@@ -108,8 +199,8 @@ int smr_propose_put(struct superpeer *sp, const char *name, const uint8_t *value
 /**
  * @brief Avisa o log de quem passou a ser o coordenador.
  *
- * O novo líder marca checkpoint no último índice aplicado. O líder antigo
- * que volta como seguidor não reaplica o próprio log.
+ * O novo líder marca o último índice aplicado e segue. Um seguidor pede
+ * @c SNAPSHOT ao coordenador e aplica só o que vier em @c STATE_TRANSFER.
  * @param sp Super Peer que recebeu ou venceu o @c COORDINATOR.
  * @param coordinator_id NodeID anunciado. Nulo limpa o coordenador conhecido.
  * @param i_am_leader 1 se @p coordinator_id é este processo.
@@ -119,7 +210,7 @@ void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, i
 /**
  * @brief Trata um @c LOG_APPEND já lido do socket.
  *
- * Índice 0 é proposta: o coordenador sela, replica e responde outro
+ * Índice 0 é proposta: o coordenador sela, roda 2PC e responde outro
  * @c LOG_APPEND no mesmo socket. Índice a partir de 1 é réplica: aplica e
  * responde @c ACK. Quem chama não segura o lock do log.
  * @param sp Super Peer que recebeu a mensagem.
@@ -132,5 +223,38 @@ void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, i
  */
 int smr_ingest_append(struct superpeer *sp, int conn, const pl_header *hdr,
                       const uint8_t *payload, size_t len);
+
+/**
+ * @brief Vota um @c PREPARE e, no mesmo socket, espera @c COMMIT ou @c ABORT.
+ *
+ * YES no fio é @c ACK. NO é @c ERROR. O corpo é o de @c log_append_pack.
+ * A hash table só muda se o @c COMMIT seguinte fechar o slot.
+ * @param sp Participante.
+ * @param conn Socket que já entregou o @c PREPARE. A decisão é lida aqui.
+ * @param hdr Header do @c PREPARE.
+ * @param payload Corpo, sem o header.
+ * @param len Tamanho de @p payload.
+ * @return 1 se o voto foi YES e a decisão foi aplicada, 0 se o voto foi NO
+ *         ou a decisão foi recusada.
+ */
+int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr,
+                       const uint8_t *payload, size_t len);
+
+/**
+ * @brief Responde um pedido @c SNAPSHOT e em seguida manda o delta.
+ *
+ * O pedido tem 9 bytes: kind 1 e `last_applied` em big-endian. A resposta
+ * tem 21 bytes: kind 2, `checkpoint_index`, `last_applied` da origem e
+ * `missing_count`. Cada entrada que falta sai como @c STATE_TRANSFER no
+ * mesmo socket. `missing_count` 0 não manda @c STATE_TRANSFER.
+ * @param sp Quem oferece o log.
+ * @param conn Socket do pedido.
+ * @param hdr Header do @c SNAPSHOT.
+ * @param payload Corpo do pedido.
+ * @param len Tamanho de @p payload.
+ * @return 1 se a resposta saiu, 0 se o pedido foi recusado.
+ */
+int smr_ingest_snapshot(struct superpeer *sp, int conn, const pl_header *hdr,
+                        const uint8_t *payload, size_t len);
 
 #endif

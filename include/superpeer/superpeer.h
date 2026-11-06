@@ -104,6 +104,9 @@ typedef struct superpeer {
   pthread_mutex_t members_lock;      /**< Serializa JOIN/LEAVE na tabela. */
   pthread_mutex_t metadata_lock;     /**< Serializa o acesso à tabela de metadata. */
   pthread_mutex_t smr_lock;          /**< Serializa o log. Não segurar durante connect ou send. */
+  /* TODO(contrato C6, Aluno 1): void (*lfu_invalidate)(struct superpeer *sp,
+     const uint8_t object_id[32]). NULL até o LFU existir. O Aluno 2 chama
+     depois de cada apply de COMMIT e de IST, com smr_lock já solto. */
 } superpeer_t;
 
 /**

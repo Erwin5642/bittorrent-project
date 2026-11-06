@@ -8,3 +8,6 @@ storage/
 
 # Fixtures do harness, geradas por tests/generate_fixtures.sh (ou tests/data.tar.gz)
 tests/data/
+
+# Rascunho do agente (spec e ledger). Não versionar.
+.agent-work/
