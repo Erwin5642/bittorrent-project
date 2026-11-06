@@ -199,8 +199,9 @@ int smr_propose_put(struct superpeer *sp, const char *name, const uint8_t *value
 /**
  * @brief Avisa o log de quem passou a ser o coordenador.
  *
- * O novo líder puxa quem estiver à frente, aborta um PREPARE sem COMMIT e marca
- * o último índice aplicado. Um seguidor pede @c SNAPSHOT ao coordenador e
+ * O novo líder puxa quem estiver à frente e lê a gaveta @c PREPARED dos vivos.
+ * Se algum já aplicou o @c COMMIT, os demais também aplicam. Se ninguém
+ * aplicou, a rodada aborta. Um seguidor pede @c SNAPSHOT ao coordenador e
  * aplica só o que vier em @c STATE_TRANSFER.
  * @param sp Super Peer que recebeu ou venceu o @c COORDINATOR.
  * @param coordinator_id NodeID anunciado. Nulo limpa o coordenador conhecido.
@@ -261,8 +262,9 @@ int smr_ingest_decision(struct superpeer *sp, int conn, const pl_header *hdr,
  * @brief Responde um pedido @c SNAPSHOT e em seguida manda o delta.
  *
  * O pedido tem 9 bytes: kind 1 e `last_applied` em big-endian. A resposta
- * tem 21 bytes: kind 2, `checkpoint_index`, `last_applied` da origem e
- * `missing_count`. Cada entrada que falta sai como @c STATE_TRANSFER no
+ * tem 46 bytes: kind 2, `checkpoint_index`, `last_applied` da origem,
+ * `missing_count`, a fase da gaveta (0 ou 1), o `log_index` dela e o
+ * `transaction_id`. Cada entrada que falta sai como @c STATE_TRANSFER no
  * mesmo socket. `missing_count` 0 não manda @c STATE_TRANSFER.
  * @param sp Quem oferece o log.
  * @param conn Socket do pedido.

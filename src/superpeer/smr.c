@@ -16,6 +16,8 @@ static pthread_mutex_t two_pc_mu = PTHREAD_MUTEX_INITIALIZER;
 #define DECISION_WIRE 24
 #define SNAPSHOT_REQ_LEN 9
 #define SNAPSHOT_REP_LEN 21
+/* Depois dos 21 bytes: fase (1), log_index (8) e transaction_id (16). */
+#define SNAPSHOT_REP_EXT_LEN (SNAPSHOT_REP_LEN + 1 + 8 + SMR_TRSC_ID_SIZE)
 
 static void put_be64(uint8_t *p, uint64_t v) {
   int i;
@@ -1050,16 +1052,37 @@ int smr_propose_put(struct superpeer *sp, const char *name, const uint8_t *value
   return propose(sp, SMR_OP_PUT, name, object_id, NULL);
 }
 
-static int peer_last_applied(superpeer_t *sp, const char *ip, uint16_t port, uint64_t *out) {
+typedef struct {
+  uint64_t last_applied;
+  int has_prepared;
+  uint64_t index;
+  uint8_t tid[SMR_TRSC_ID_SIZE];
+} tx_view_t;
+
+static void read_local_view(superpeer_t *sp, tx_view_t *out) {
+  memset(out, 0, sizeof *out);
+  pthread_mutex_lock(&sp->smr_lock);
+  out->last_applied = sp->smr.last_applied;
+  if (sp->smr.prepared_phase == SMR_TX_PREPARED) {
+    out->has_prepared = 1;
+    out->index = sp->smr.prepared.log_index;
+    memcpy(out->tid, sp->smr.prepared.transaction_id, SMR_TRSC_ID_SIZE);
+  }
+  pthread_mutex_unlock(&sp->smr_lock);
+}
+
+/* Lê last_applied e, se a resposta trouxer, a gaveta PREPARED. */
+static int peer_tx_view(superpeer_t *sp, const char *ip, uint16_t port, tx_view_t *out) {
   uint64_t mine;
   uint8_t req[SNAPSHOT_REQ_LEN];
-  uint8_t rep[64];
+  uint8_t rep[SNAPSHOT_REP_EXT_LEN];
   uint8_t *frame;
   pl_header hdr;
   msg_t msg;
   int fd;
   int ok = 0;
 
+  memset(out, 0, sizeof *out);
   pthread_mutex_lock(&sp->smr_lock);
   mine = sp->smr.last_applied;
   pthread_mutex_unlock(&sp->smr_lock);
@@ -1080,12 +1103,18 @@ static int peer_last_applied(superpeer_t *sp, const char *ip, uint16_t port, uin
     msg = simple_recv(fd, rep, sizeof rep);
     if (msg.status == NET_OK && msg.header.msg_type == SNAPSHOT && msg.header.pl_size >= SNAPSHOT_REP_LEN &&
         rep[0] == 2) {
-      *out = get_be64(rep + 9);
+      out->last_applied = get_be64(rep + 9);
+      if (msg.header.pl_size >= SNAPSHOT_REP_EXT_LEN && rep[SNAPSHOT_REP_LEN] == 1) {
+        out->has_prepared = 1;
+        out->index = get_be64(rep + SNAPSHOT_REP_LEN + 1);
+        memcpy(out->tid, rep + SNAPSHOT_REP_LEN + 1 + 8, SMR_TRSC_ID_SIZE);
+      }
       ok = 1;
     }
   }
   free(frame);
   net_close(fd);
+  (void)mine;
   return ok;
 }
 
@@ -1109,45 +1138,13 @@ static void copy_live_peers(superpeer_t *sp, member_t *out, size_t *count) {
   pthread_mutex_unlock(&sp->members_lock);
 }
 
-/* Se algum vivo já aplicou mais longe, puxa o trecho. Senão não imprime IST. */
-static void catch_up_peers(superpeer_t *sp) {
-  member_t targets[MEMBER_TABLE_MAX_SIZE];
-  size_t count = 0;
-  size_t i;
-  uint64_t mine;
-  uint64_t best;
-  char best_ip[INET_ADDRSTRLEN];
-  uint16_t best_port = 0;
-
-  pthread_mutex_lock(&sp->smr_lock);
-  mine = sp->smr.last_applied;
-  pthread_mutex_unlock(&sp->smr_lock);
-  best = mine;
-  copy_live_peers(sp, targets, &count);
-  for (i = 0; i < count; i++) {
-    char ip[INET_ADDRSTRLEN];
-    uint64_t last = 0;
-
-    if (!inet_ntop(AF_INET, &targets[i].ipv4, ip, sizeof ip)) {
-      continue;
-    }
-    if (!peer_last_applied(sp, ip, targets[i].port, &last) || last <= best) {
-      continue;
-    }
-    best = last;
-    snprintf(best_ip, sizeof best_ip, "%s", ip);
-    best_port = targets[i].port;
-  }
-  if (best_port != 0 && best > mine) {
-    ist_from(sp, best_ip, best_port);
-  }
-}
-
-static void broadcast_abort(superpeer_t *sp, const uint8_t tid[SMR_TRSC_ID_SIZE], uint64_t index) {
+static void broadcast_decision(superpeer_t *sp, int commit, const uint8_t tid[SMR_TRSC_ID_SIZE],
+                               uint64_t index) {
   member_t targets[MEMBER_TABLE_MAX_SIZE];
   uint8_t body[DECISION_WIRE];
   size_t count = 0;
   size_t i;
+  uint16_t type = commit ? COMMIT : ABORT;
 
   memcpy(body, tid, SMR_TRSC_ID_SIZE);
   put_be64(body + SMR_TRSC_ID_SIZE, index);
@@ -1165,7 +1162,7 @@ static void broadcast_abort(superpeer_t *sp, const uint8_t tid[SMR_TRSC_ID_SIZE]
     if (fd < 0) {
       continue;
     }
-    if (send_frame(fd, sp, NULL, ABORT, body, DECISION_WIRE)) {
+    if (send_frame(fd, sp, NULL, type, body, DECISION_WIRE)) {
       msg = simple_recv(fd, reply, sizeof reply);
       (void)msg;
     }
@@ -1173,31 +1170,80 @@ static void broadcast_abort(superpeer_t *sp, const uint8_t tid[SMR_TRSC_ID_SIZE]
   }
 }
 
-/* O processo morto levou o slot. Sem COMMIT nos vivos, a rodada aborta. */
+/* Pergunta a gaveta de cada vivo. Alguém com COMMIT: completa. Ninguém: ABORT. */
 static void recover_prepared(superpeer_t *sp) {
-  uint8_t tid[SMR_TRSC_ID_SIZE];
-  uint64_t index = 0;
-  int pending = 0;
+  member_t targets[MEMBER_TABLE_MAX_SIZE];
+  tx_view_t views[MEMBER_TABLE_MAX_SIZE + 1];
+  int seen[MEMBER_TABLE_MAX_SIZE + 1];
+  size_t npeers = 0;
+  size_t nviews = 1;
+  size_t i;
+  size_t j;
+  uint64_t mine;
+  uint64_t best;
+  char best_ip[INET_ADDRSTRLEN];
+  uint16_t best_port = 0;
 
-  catch_up_peers(sp);
-  pthread_mutex_lock(&sp->metadata_lock);
-  pthread_mutex_lock(&sp->smr_lock);
-  if (sp->smr.prepared_phase == SMR_TX_PREPARED && sp->smr.prepared.log_index <= sp->smr.last_applied) {
-    prepared_clear(&sp->smr);
-  } else if (sp->smr.prepared_phase == SMR_TX_PREPARED) {
-    pending = 1;
-    memcpy(tid, sp->smr.prepared.transaction_id, SMR_TRSC_ID_SIZE);
-    index = sp->smr.prepared.log_index;
+  memset(views, 0, sizeof views);
+  memset(seen, 0, sizeof seen);
+  read_local_view(sp, &views[0]);
+  mine = views[0].last_applied;
+  best = mine;
+  copy_live_peers(sp, targets, &npeers);
+  for (i = 0; i < npeers && nviews < MEMBER_TABLE_MAX_SIZE + 1; i++) {
+    char ip[INET_ADDRSTRLEN];
+
+    if (!inet_ntop(AF_INET, &targets[i].ipv4, ip, sizeof ip)) {
+      continue;
+    }
+    if (!peer_tx_view(sp, ip, targets[i].port, &views[nviews])) {
+      continue;
+    }
+    if (views[nviews].last_applied > best) {
+      best = views[nviews].last_applied;
+      snprintf(best_ip, sizeof best_ip, "%s", ip);
+      best_port = targets[i].port;
+    }
+    nviews++;
   }
-  pthread_mutex_unlock(&sp->smr_lock);
-  pthread_mutex_unlock(&sp->metadata_lock);
-  if (!pending) {
-    return;
+  if (best_port != 0 && best > mine) {
+    ist_from(sp, best_ip, best_port);
   }
-  broadcast_abort(sp, tid, index);
-  finish_locked(sp, SMR_TX_ABORTED);
-  printf("ABORT\n");
-  fflush(stdout);
+  read_local_view(sp, &views[0]);
+  mine = views[0].last_applied;
+
+  for (i = 0; i < nviews; i++) {
+    int committed = 0;
+    int local_match;
+    uint64_t index;
+
+    if (!views[i].has_prepared || seen[i] || views[i].index == 0) {
+      continue;
+    }
+    index = views[i].index;
+    for (j = i; j < nviews; j++) {
+      if (views[j].has_prepared && views[j].index == index &&
+          memcmp(views[j].tid, views[i].tid, SMR_TRSC_ID_SIZE) == 0) {
+        seen[j] = 1;
+      }
+    }
+    if (index <= mine) {
+      committed = 1;
+    }
+    for (j = 0; j < nviews; j++) {
+      if (views[j].last_applied >= index) {
+        committed = 1;
+      }
+    }
+    broadcast_decision(sp, committed, views[i].tid, index);
+    local_match = views[0].has_prepared && views[0].index == index &&
+                  memcmp(views[0].tid, views[i].tid, SMR_TRSC_ID_SIZE) == 0;
+    if (local_match && (!committed || index <= mine || index == mine + 1)) {
+      finish_locked(sp, committed ? SMR_TX_COMMITTED : SMR_TX_ABORTED);
+    }
+    printf("%s\n", committed ? "COMMIT" : "ABORT");
+    fflush(stdout);
+  }
 }
 
 void smr_on_coordinator(struct superpeer *sp, const node_id_t *coordinator_id, int i_am_leader) {
@@ -1411,7 +1457,10 @@ int smr_ingest_snapshot(struct superpeer *sp, int conn, const pl_header *hdr, co
   const smr_entry_t *missing[SMR_LOG_MAX];
   uint8_t *packed[SMR_LOG_MAX];
   size_t packed_len[SMR_LOG_MAX];
-  uint8_t reply[SNAPSHOT_REP_LEN];
+  uint8_t reply[SNAPSHOT_REP_EXT_LEN];
+  uint8_t prep_phase = 0;
+  uint64_t prep_index = 0;
+  uint8_t prep_tid[SMR_TRSC_ID_SIZE];
   uint64_t requester_last;
   size_t ncopy = 0;
   size_t i;
@@ -1453,6 +1502,11 @@ int smr_ingest_snapshot(struct superpeer *sp, int conn, const pl_header *hdr, co
     packed[i] = buf;
     packed_len[i] = (size_t)n;
   }
+  if (ok && sp->smr.prepared_phase == SMR_TX_PREPARED) {
+    prep_phase = 1;
+    prep_index = sp->smr.prepared.log_index;
+    memcpy(prep_tid, sp->smr.prepared.transaction_id, SMR_TRSC_ID_SIZE);
+  }
   pthread_mutex_unlock(&sp->smr_lock);
   if (!ok) {
     for (i = 0; i < SMR_LOG_MAX; i++) {
@@ -1462,11 +1516,17 @@ int smr_ingest_snapshot(struct superpeer *sp, int conn, const pl_header *hdr, co
     return 0;
   }
 
+  memset(reply, 0, sizeof reply);
   reply[0] = 2;
   put_be64(reply + 1, offer.checkpoint_index);
   put_be64(reply + 9, offer.source_last_applied);
   put_be32(reply + 17, (uint32_t)offer.missing_count);
-  if (!send_frame(conn, sp, hdr, SNAPSHOT, reply, SNAPSHOT_REP_LEN)) {
+  reply[SNAPSHOT_REP_LEN] = prep_phase;
+  put_be64(reply + SNAPSHOT_REP_LEN + 1, prep_index);
+  if (prep_phase) {
+    memcpy(reply + SNAPSHOT_REP_LEN + 1 + 8, prep_tid, SMR_TRSC_ID_SIZE);
+  }
+  if (!send_frame(conn, sp, hdr, SNAPSHOT, reply, SNAPSHOT_REP_EXT_LEN)) {
     for (i = 0; i < ncopy; i++) {
       free(packed[i]);
     }
