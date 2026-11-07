@@ -42,6 +42,30 @@ int net_listen(uint16_t port);
 int net_connect(const char* host_addr, uint16_t port);
 
 /**
+ * @brief Conecta a um host IPv4 com prazo para o handshake TCP.
+ *
+ * O socket sai em modo bloqueante, como em @c net_connect. Um destino que não
+ * responde (processo parado, rede cortada) deixa de segurar o caller por todo
+ * o timeout do kernel.
+ * @param host_addr IPv4 em notação decimal com pontos.
+ * @param port Porta TCP, host byte order.
+ * @param timeout_ms Prazo do connect em milissegundos. Zero ou negativo cai em @c net_connect.
+ * @return fd conectado, ou @c -1 em erro ou prazo esgotado.
+ */
+int net_connect_timeout(const char* host_addr, uint16_t port, int timeout_ms);
+
+/**
+ * @brief Arma o prazo de @c send e @c recv de um socket conectado.
+ *
+ * Passado o prazo sem progresso, @c send_all e @c recv_all devolvem
+ * @c NET_ERROR em vez de bloquear.
+ * @param fd Socket conectado.
+ * @param timeout_ms Prazo em milissegundos. Zero tira o prazo.
+ * @return 0 em sucesso, @c -1 em erro.
+ */
+int net_set_timeout(int fd, int timeout_ms);
+
+/**
  * @brief Aceita uma conexão pendente em um socket de escuta.
  * @param listen_fd fd retornado por @c net_listen.
  * @param out_addr Recebe o endereço do remoto; o caller aloca.

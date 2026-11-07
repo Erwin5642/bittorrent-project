@@ -51,12 +51,13 @@ TEST_SMR = $(BIN_DIR)/test_smr
 TEST_2PC = $(BIN_DIR)/test_2pc
 TEST_IST = $(BIN_DIR)/test_ist
 TEST_LFU = $(BIN_DIR)/test_lfu
+TEST_NETWORK = $(BIN_DIR)/test_network
 TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC) $(TEST_IST) $(TEST_LFU)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC) $(TEST_IST) $(TEST_LFU) $(TEST_NETWORK)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
@@ -74,6 +75,7 @@ test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMP
 	$(TEST_2PC)
 	$(TEST_IST)
 	$(TEST_LFU)
+	$(TEST_NETWORK)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -137,6 +139,9 @@ $(BIN_DIR)/test_2pc: tests/superpeer/test_2pc.c $(METADATA_OBJ) $(SMR_OBJ) $(COM
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_ist: tests/superpeer/test_ist.c $(METADATA_OBJ) $(SMR_OBJ) $(COMMON_OBJS) $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_network: tests/common/test_network.c $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_lfu: tests/superpeer/test_lfu.c $(LFU_OBJ) $(TEST_UTILS_OBJ) | $(BIN_DIR)

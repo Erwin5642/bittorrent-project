@@ -212,7 +212,40 @@ static void test_vote_rejects(void) {
   free(log);
 }
 
+/**
+ * @brief Só o índice acima de last_applied + 1 é buraco. É o que dispara o IST.
+ */
+static void test_vote_hole_detection(void) {
+  smr_log_t *log = new_log();
+  metadata_table_t *table = new_table();
+  smr_entry_t first;
+  smr_entry_t next;
+  smr_entry_t far;
+  smr_entry_t stale;
+  uint8_t id[METADATA_OBJECT_ID_SIZE];
+
+  fill_id(id, 5);
+  expect(smr_vote_hole(NULL, NULL) == 0, "argumentos nulos nao sao buraco");
+  expect(seal_entry(&first, SMR_OP_PUT, 1, 1, "um", id, NULL) == 1, "sela 1");
+  expect(seal_entry(&next, SMR_OP_PUT, 2, 1, "dois", id, NULL) == 1, "sela 2");
+  expect(seal_entry(&far, SMR_OP_PUT, 5, 1, "cinco", id, NULL) == 1, "sela 5");
+  expect(smr_vote_hole(log, &first) == 0, "indice seguinte nao e buraco");
+  expect(smr_vote_hole(log, &next) == 1, "log vazio e indice 2 e buraco");
+  expect(smr_vote_hole(log, &far) == 1, "indice 5 num log vazio e buraco");
+
+  expect(smr_log_apply(log, table, &first) == 1, "aplica 1");
+  expect(smr_vote_hole(log, &next) == 0, "depois de aplicar 1, o 2 e o seguinte");
+  expect(smr_vote_hole(log, &far) == 1, "o 5 continua buraco");
+  expect(seal_entry(&stale, SMR_OP_PUT, 1, 1, "um", id, NULL) == 1, "sela 1 de novo");
+  expect(smr_vote_hole(log, &stale) == 0, "indice ja aplicado nao e buraco");
+
+  smr_log_shutdown(log);
+  free(log);
+  free(table);
+}
+
 int main(void) {
+  test_vote_hole_detection();
   test_all_yes_applies_once();
   test_one_no_discards_slot();
   test_recover_from_prepare();

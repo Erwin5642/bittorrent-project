@@ -6,9 +6,13 @@
  * completa; o framing de mensagem fica em protocol.c.
  */
 #include<errno.h>
+#include<fcntl.h>
+#include<poll.h>
 #include<stdint.h>
 #include<stdio.h>
+#include<string.h>
 #include<unistd.h>
+#include<sys/time.h>
 #include<arpa/inet.h>
 #include "../../include/common/network.h"
 
@@ -84,6 +88,93 @@ int net_connect(const char* host_addr, uint16_t port){
 	}
 
 	return net_fd;
+}
+
+/* Como net_connect, mas desiste do connect depois de timeout_ms. */
+int net_connect_timeout(const char* host_addr, uint16_t port, int timeout_ms){
+	int net_fd;
+	int flags;
+	int err = 0;
+	socklen_t errlen = sizeof(err);
+	struct sockaddr_in address;
+	struct pollfd pfd;
+	int rc;
+
+	if(timeout_ms <= 0)
+		return net_connect(host_addr, port);
+
+	if((net_fd = socket(PF_INET, SOCK_STREAM, 0))<0){
+		perror("net_connect_timeout:socket");
+		return -1;
+	}
+
+	memset(&address, 0, sizeof(address));
+	address.sin_family = AF_INET;
+	address.sin_port = htons(port);
+	if(inet_pton(AF_INET, host_addr, &address.sin_addr) != 1){
+		perror("net_connect_timeout:inet_pton");
+		close(net_fd);
+		return -1;
+	}
+
+	/* connect não bloqueante: o poll abaixo impõe o prazo. */
+	flags = fcntl(net_fd, F_GETFL, 0);
+	if(flags < 0 || fcntl(net_fd, F_SETFL, flags | O_NONBLOCK) < 0){
+		perror("net_connect_timeout:fcntl");
+		close(net_fd);
+		return -1;
+	}
+
+	if(connect(net_fd, (struct sockaddr*)&address, sizeof(address)) < 0){
+		if(errno != EINPROGRESS){
+			perror("net_connect_timeout:connect");
+			close(net_fd);
+			return -1;
+		}
+		pfd.fd = net_fd;
+		pfd.events = POLLOUT;
+		pfd.revents = 0;
+		do{
+			rc = poll(&pfd, 1, timeout_ms);
+		}while(rc < 0 && errno == EINTR);
+		if(rc <= 0){
+			if(rc == 0)
+				fprintf(stderr, "net_connect_timeout:connect: tempo esgotado (%d ms)\n", timeout_ms);
+			else
+				perror("net_connect_timeout:poll");
+			close(net_fd);
+			return -1;
+		}
+		if(getsockopt(net_fd, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0 || err != 0){
+			errno = err;
+			perror("net_connect_timeout:connect");
+			close(net_fd);
+			return -1;
+		}
+	}
+
+	if(fcntl(net_fd, F_SETFL, flags) < 0){
+		perror("net_connect_timeout:fcntl");
+		close(net_fd);
+		return -1;
+	}
+	return net_fd;
+}
+
+/* Prazo de send e recv num socket já conectado. 0 tira o prazo. */
+int net_set_timeout(int fd, int timeout_ms){
+	struct timeval tv;
+
+	if(timeout_ms < 0)
+		return -1;
+	tv.tv_sec = timeout_ms / 1000;
+	tv.tv_usec = (timeout_ms % 1000) * 1000;
+	if(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+	   setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0){
+		perror("net_set_timeout:setsockopt");
+		return -1;
+	}
+	return 0;
 }
 
 /* Aceita uma conexao pendente; devolve o endereco do remoto em out_addr. */
