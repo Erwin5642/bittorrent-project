@@ -10,7 +10,21 @@ LAST_PID=""
 
 mkdir -p "$FLOW_LOG" "$FLOW_OUT"
 
-say() { printf '[harness] %s\n' "$*"; }
+say() { printf '%s [harness] %s\n' "$(date +%H:%M:%S.%3N)" "$*"; }
+
+# Prefixa cada linha com o instante em que a captura a leu.
+# O programa em si não muda. As conferências ignoram esse prefixo.
+stamp_stream() {
+    local line
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+        printf '%s %s\n' "$(date +%H:%M:%S.%3N)" "$line"
+    done
+}
+
+# Tira o prefixo HH:MM:SS.mmm para comparar com o texto original.
+logical_log() {
+    sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} //'
+}
 
 die() {
     say "FALHA: $*"
@@ -26,7 +40,8 @@ start_node() {
 
     : > "$logfile"
     say "subindo $tag na porta $port → $(basename "$logfile")"
-    stdbuf -oL -eL "$NODE_BIN" --config "$FLOW_CONF" --port "$port" >>"$logfile" 2>&1 &
+    stdbuf -oL -eL "$NODE_BIN" --config "$FLOW_CONF" --port "$port" \
+        > >(stamp_stream >>"$logfile") 2>&1 &
     LAST_PID=$!
     PIDS+=("$LAST_PID")
 }
@@ -47,26 +62,55 @@ wait_log() {
     local desc="$4"
     local hit
 
+    local start now
     say "esperando até ${timeout}s em $(basename "$file"): $desc"
     say "  padrão: $pattern"
-    if ! wait_for_pattern "$file" "$pattern" "$timeout"; then
-        die "tempo esgotado (${timeout}s) em $(basename "$file"): $desc. Padrão: $pattern"
-    fi
-    hit=$(grep -E "$pattern" "$file" | tail -n 1)
+    start=$(date +%s)
+    while true; do
+        if logical_log <"$file" | grep -Eq "$pattern"; then
+            break
+        fi
+        now=$(date +%s)
+        if (( now - start >= timeout )); then
+            die "tempo esgotado (${timeout}s) em $(basename "$file"): $desc. Padrão: $pattern"
+        fi
+        sleep 1
+    done
+    hit=$(awk -v pat="$pattern" '
+        {
+            line = $0
+            sub(/^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} /, "", line)
+            if (line ~ pat) {
+                found = $0
+            }
+        }
+        END { if (found) print found }
+    ' "$file")
     say "apareceu em $(basename "$file"): $hit"
 }
 
 run_client() {
     local logfile="$1"
     local tag
+    local fifo
+    local stamper
     local rc
 
     shift
     tag=$(basename "$logfile" .log)
     : > "$logfile"
     say "cliente $tag: $CLIENT_BIN $*"
-    "$CLIENT_BIN" "$@" >"$logfile" 2>&1
+    # FIFO em vez de >(...): o wait abaixo garante que o carimbo gravou a última
+    # linha antes de qualquer conferência ler o log.
+    fifo="$logfile.fifo"
+    rm -f "$fifo"
+    mkfifo "$fifo"
+    stamp_stream <"$fifo" >>"$logfile" &
+    stamper=$!
+    "$CLIENT_BIN" "$@" >"$fifo" 2>&1
     rc=$?
+    wait "$stamper"
+    rm -f "$fifo"
     if [[ "$rc" -ne 0 ]]; then
         die "cliente saiu com $rc ($*) — ver $(basename "$logfile")"
     fi
@@ -139,7 +183,7 @@ assert_round() {
             }
             print "ok"
         }
-    ' "$file")
+    ' < <(logical_log <"$file"))
     if [[ "$result" != "ok" ]]; then
         die "$(basename "$file"): $result"
     fi
@@ -160,7 +204,7 @@ assert_log_sequence() {
             prev == "LOG #" idx && $0 == "STORE " name { found = 1 }
             { prev = $0 }
             END { if (!found) print "sem LOG #" idx " / STORE " name }
-        ' "$file")
+        ' < <(logical_log <"$file"))
         if [[ -n "$result" ]]; then
             die "$(basename "$file"): $result"
         fi
@@ -189,7 +233,7 @@ assert_lines_in_order() {
                 print pats[p]
             }
         }
-    ' "$file")
+    ' < <(logical_log <"$file"))
     if [[ -n "$missing" ]]; then
         die "$(basename "$file") não teve a linha '$missing' depois das anteriores"
     fi
@@ -201,7 +245,7 @@ assert_exact_absent() {
     local line="$2"
 
     say "confirmando que $(basename "$file") não tem a linha '$line'"
-    if grep -qx -F "$line" "$file"; then
+    if logical_log <"$file" | grep -qx -F "$line"; then
         die "$(basename "$file") contém a linha '$line'"
     fi
     say "$(basename "$file") não tem '$line'"
@@ -212,7 +256,7 @@ assert_name_absent() {
     local name="$2"
 
     say "confirmando que $(basename "$file") não aplicou STORE $name"
-    if grep -qx -F "STORE $name" "$file"; then
+    if logical_log <"$file" | grep -qx -F "STORE $name"; then
         die "$(basename "$file") contém STORE $name"
     fi
     say "$(basename "$file") não tem STORE $name"
@@ -228,14 +272,14 @@ assert_state() {
 
     say "consultando state na porta $port: espero LogIndex $index, Objects: $objects, nomes: $*"
     run_client "$logfile" --cmd state --host 127.0.0.1 --port "$port"
-    if ! grep -qx "LogIndex $index" "$logfile"; then
+    if ! logical_log <"$logfile" | grep -qx "LogIndex $index"; then
         die "state :$port sem LogIndex $index — ver $(basename "$logfile")"
     fi
-    if ! grep -qx "Objects: $objects" "$logfile"; then
+    if ! logical_log <"$logfile" | grep -qx "Objects: $objects"; then
         die "state :$port sem Objects: $objects — ver $(basename "$logfile")"
     fi
     for name in "$@"; do
-        if ! grep -q "^${name} v" "$logfile"; then
+        if ! logical_log <"$logfile" | grep -q "^${name} v"; then
             die "state :$port sem $name — ver $(basename "$logfile")"
         fi
     done

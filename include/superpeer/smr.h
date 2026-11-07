@@ -18,6 +18,23 @@
 /** Teto de entradas do log em memória. Não é limite do fio. */
 #define SMR_LOG_MAX 256
 
+/** Prazo do connect das mensagens do 2PC e do IST, em milissegundos. */
+#define SMR_CONNECT_TIMEOUT_MS 2000
+/** Prazo de cada send e recv do 2PC e do IST: voto, ACK da decisão, SNAPSHOT e STATE_TRANSFER. */
+#define SMR_IO_TIMEOUT_MS 5000
+/**
+ * Prazo de quem encaminhou a proposta esperando o coordenador fechar a rodada.
+ * Precisa ficar acima da soma dos prazos de uma rodada e da pausa
+ * @c BT_PAUSE_AFTER_PREPARE usada na demonstração.
+ */
+#define SMR_FORWARD_TIMEOUT_MS 120000
+/** Silêncio do coordenador, depois do YES, antes de o participante perguntar o desfecho. */
+#define SMR_DECISION_POLL_MS 5000
+/** Espera até o IST que corrige um buraco no log. Deixa um COMMIT em voo chegar antes. */
+#define SMR_IST_RETRY_DELAY_MS 1000
+/** Tentativas, entre as esperas, de fechar um slot PREPARED sem decisão. */
+#define SMR_SETTLE_TRIES 12
+
 struct superpeer;
 
 /**
@@ -117,6 +134,18 @@ int smr_log_apply(smr_log_t *log, metadata_table_t *table, const smr_entry_t *en
  * @return 1 se a entrada ficou no slot, 0 se o voto é NO ou o argumento é nulo.
  */
 int smr_prepare_vote(smr_log_t *log, const smr_entry_t *entry);
+
+/**
+ * @brief Diz se um voto NO de @c PREPARE veio de um buraco no log.
+ *
+ * Há buraco quando o @c log_index da entrada passa de @c last_applied + 1: este
+ * nó perdeu um ou mais COMMITs e só o IST o põe em dia. Índice já aplicado, slot
+ * ocupado e checksum ruim não são buraco.
+ * @param log Log local.
+ * @param entry Entrada do @c PREPARE.
+ * @return 1 se há buraco, 0 caso contrário ou se algum argumento for nulo.
+ */
+int smr_vote_hole(const smr_log_t *log, const smr_entry_t *entry);
 
 /**
  * @brief Fecha a rodada a partir dos votos.

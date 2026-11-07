@@ -36,7 +36,8 @@ SP2_PID=$LAST_PID
 start_node 5103 "$LOG3" sp5103
 
 wait_log "$LOG3" '^highest NodeID wins$' 30 "SP3 vencer a eleição"
-COORD_HEX=$(awk '/^highest NodeID wins$/{getline; if ($1=="COORDINATOR"){print $2; exit}}' "$LOG3")
+wait_log "$LOG3" '^COORDINATOR ' 5 "SP3 anunciar o próprio NodeID"
+COORD_HEX=$(logical_log <"$LOG3" | awk '/^highest NodeID wins$/{getline; if ($1=="COORDINATOR"){print $2; exit}}')
 if [[ -z "$COORD_HEX" ]]; then
     die "SP3 não imprimiu COORDINATOR depois de highest NodeID wins"
 fi
@@ -124,10 +125,10 @@ say "fase 7: download de A na porta 5101 e comparação byte a byte com o arquiv
 run_client "$FLOW_LOG/download-a.log" \
     --cmd download --name documento_a.pdf --output "$FLOW_OUT/documento_a.out" \
     --host 127.0.0.1 --port 5101
-if ! grep -qx "Download completed" "$FLOW_LOG/download-a.log"; then
+if ! logical_log <"$FLOW_LOG/download-a.log" | grep -qx "Download completed"; then
     die "download-a.log sem Download completed"
 fi
-if ! grep -qx "SHA-256 verified" "$FLOW_LOG/download-a.log"; then
+if ! logical_log <"$FLOW_LOG/download-a.log" | grep -qx "SHA-256 verified"; then
     die "download-a.log sem SHA-256 verified"
 fi
 if ! cmp -s "$FLOW_OUT/files/documento_a.pdf" "$FLOW_OUT/documento_a.out"; then

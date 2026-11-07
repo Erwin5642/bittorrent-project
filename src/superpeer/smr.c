@@ -1,7 +1,9 @@
 #include "superpeer/superpeer.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +83,17 @@ static int copy_name(char dst[METADATA_FILENAME_MAX], const char *src) {
 
 static int endpoint_is_self(const superpeer_t *sp, uint32_t ipv4, uint16_t port) {
   return sp && ipv4 == sp->cfg.ipv4 && port == sp->cfg.port;
+}
+
+/* Conecta com prazo no connect e em cada send/recv. Um nó parado não segura a rodada. */
+static int dial(const char *ip, uint16_t port, int io_timeout_ms) {
+  int fd = net_connect_timeout(ip, port, SMR_CONNECT_TIMEOUT_MS);
+
+  if (fd >= 0 && net_set_timeout(fd, io_timeout_ms) != 0) {
+    net_close(fd);
+    return -1;
+  }
+  return fd;
 }
 
 /* O log fica dono do bloco novo. O ponteiro de origem continua com quem chamou. */
@@ -267,6 +280,13 @@ int smr_prepare_vote(smr_log_t *log, const smr_entry_t *entry) {
   log->prepared = copy;
   log->prepared_phase = SMR_TX_PREPARED;
   return 1;
+}
+
+int smr_vote_hole(const smr_log_t *log, const smr_entry_t *entry) {
+  if (!log || !entry) {
+    return 0;
+  }
+  return entry->log_index > log->last_applied + 1;
 }
 
 smr_tx_phase_t smr_tx_decide_votes(const int *yes, size_t n) {
@@ -620,17 +640,22 @@ static int round_two_pc(superpeer_t *sp, const uint8_t *packed, size_t packed_le
       votes[n_votes++] = 0;
       continue;
     }
-    fd = net_connect(ip, targets[i].port);
+    fd = dial(ip, targets[i].port, SMR_IO_TIMEOUT_MS);
     if (fd < 0 || !send_frame(fd, sp, NULL, PREPARE, packed, packed_len)) {
       if (fd >= 0) {
         net_close(fd);
       }
+      fprintf(stderr, "2PC: %s:%u inalcançável; conta como NO\n", ip, (unsigned)targets[i].port);
       printf("NO\n");
       votes[n_votes++] = 0;
       continue;
     }
     msg = simple_recv(fd, reply, sizeof reply);
     yes = msg.status == NET_OK && msg.header.msg_type == ACK;
+    if (msg.status != NET_OK) {
+      fprintf(stderr, "2PC: sem voto de %s:%u (prazo de %d ms); conta como NO\n", ip,
+              (unsigned)targets[i].port, SMR_IO_TIMEOUT_MS);
+    }
     printf("%s\n", yes ? "YES" : "NO");
     votes[n_votes++] = yes;
     if (yes) {
@@ -769,7 +794,7 @@ static void ist_from(superpeer_t *sp, const char *ip, uint16_t port) {
   put_be64(req + 1, mine);
 
   for (attempt = 0; attempt < 5; attempt++) {
-    fd = net_connect(ip, port);
+    fd = dial(ip, port, SMR_IO_TIMEOUT_MS);
     if (fd >= 0) {
       break;
     }
@@ -941,7 +966,7 @@ static int forward_proposal(superpeer_t *sp, const member_t *coord, smr_op_t op,
     free(reply_buf);
     return ok;
   }
-  fd = net_connect(ip, coord->port);
+  fd = dial(ip, coord->port, SMR_FORWARD_TIMEOUT_MS);
   if (fd < 0) {
     if (fd >= 0) {
       net_close(fd);
@@ -1088,7 +1113,7 @@ static int peer_tx_view(superpeer_t *sp, const char *ip, uint16_t port, tx_view_
   pthread_mutex_unlock(&sp->smr_lock);
   req[0] = 1;
   put_be64(req + 1, mine);
-  fd = net_connect(ip, port);
+  fd = dial(ip, port, SMR_IO_TIMEOUT_MS);
   if (fd < 0) {
     return 0;
   }
@@ -1158,7 +1183,7 @@ static void broadcast_decision(superpeer_t *sp, int commit, const uint8_t tid[SM
     if (!inet_ntop(AF_INET, &targets[i].ipv4, ip, sizeof ip)) {
       continue;
     }
-    fd = net_connect(ip, targets[i].port);
+    fd = dial(ip, targets[i].port, SMR_IO_TIMEOUT_MS);
     if (fd < 0) {
       continue;
     }
@@ -1380,13 +1405,120 @@ static int close_slot(superpeer_t *sp, const uint8_t *payload, size_t len, int c
   return ok;
 }
 
+/* Desfecho de um slot PREPARED, segundo o coordenador. */
+typedef enum {
+  SETTLE_PENDING = 0, /* coordenador ainda decide, não responde ou está atrás: tentar depois */
+  SETTLE_COMMITTED,
+  SETTLE_ABORTED
+} settle_t;
+
+/*
+ * Termination protocol do participante: pergunta ao coordenador o que foi da
+ * transação (tid, index) que ficou sem decisão neste nó. Só fecha o slot quando
+ * o coordenador prova o desfecho. Um voto YES nunca vira abort por conta própria.
+ */
+static settle_t settle_with_coordinator(superpeer_t *sp, const uint8_t tid[SMR_TRSC_ID_SIZE],
+                                        uint64_t index) {
+  uint32_t ipv4 = 0;
+  uint16_t port = 0;
+  char ip[INET_ADDRSTRLEN];
+  uint8_t body[DECISION_WIRE];
+  tx_view_t view;
+  tx_view_t mine;
+
+  if (!coordinator_endpoint(sp, &ipv4, &port) || !inet_ntop(AF_INET, &ipv4, ip, sizeof ip)) {
+    return SETTLE_PENDING;
+  }
+  if (!peer_tx_view(sp, ip, port, &view)) {
+    return SETTLE_PENDING;
+  }
+  memcpy(body, tid, SMR_TRSC_ID_SIZE);
+  put_be64(body + SMR_TRSC_ID_SIZE, index);
+
+  if (view.last_applied >= index) {
+    /* O coordenador aplicou: foi COMMIT. O IST traz a entrada que este nó não viu. */
+    ist_from(sp, ip, port);
+    read_local_view(sp, &mine);
+    if (mine.last_applied < index) {
+      return SETTLE_PENDING;
+    }
+    close_slot(sp, body, DECISION_WIRE, 1);
+    printf("settled LogIndex %llu: aplicado no coordenador\n", (unsigned long long)index);
+    fflush(stdout);
+    return SETTLE_COMMITTED;
+  }
+  if (view.has_prepared && view.index == index && memcmp(view.tid, tid, SMR_TRSC_ID_SIZE) == 0) {
+    return SETTLE_PENDING;
+  }
+  if (view.last_applied + 1 < index) {
+    /* Coordenador atrás do índice selado (reiniciou, log perdido): quem decide é a eleição. */
+    return SETTLE_PENDING;
+  }
+  /* Sem COMMIT e sem a transação no slot do coordenador: a rodada abortou. */
+  close_slot(sp, body, DECISION_WIRE, 0);
+  printf("settled LogIndex %llu: rodada abortada\n", (unsigned long long)index);
+  fflush(stdout);
+  return SETTLE_ABORTED;
+}
+
+static pthread_mutex_t resync_mu = PTHREAD_MUTEX_INITIALIZER;
+static int resync_pending;
+
+/* Depois de uma pausa: fecha um slot sem decisão e põe o log em dia com o coordenador. */
+static void *resync_worker(void *arg) {
+  superpeer_t *sp = arg;
+  int tries;
+
+  usleep((useconds_t)SMR_IST_RETRY_DELAY_MS * 1000u);
+  for (tries = 0; tries < SMR_SETTLE_TRIES; tries++) {
+    tx_view_t mine;
+
+    read_local_view(sp, &mine);
+    if (!mine.has_prepared || settle_with_coordinator(sp, mine.tid, mine.index) != SETTLE_PENDING) {
+      break;
+    }
+    usleep((useconds_t)SMR_IST_RETRY_DELAY_MS * 1000u);
+  }
+  ist_sync(sp);
+  pthread_mutex_lock(&resync_mu);
+  resync_pending = 0;
+  pthread_mutex_unlock(&resync_mu);
+  return NULL;
+}
+
+/* No máximo um resync por vez. Chamadas durante um resync em curso são absorvidas. */
+static void schedule_resync(superpeer_t *sp) {
+  pthread_t thread;
+
+  pthread_mutex_lock(&resync_mu);
+  if (resync_pending) {
+    pthread_mutex_unlock(&resync_mu);
+    return;
+  }
+  resync_pending = 1;
+  pthread_mutex_unlock(&resync_mu);
+  if (pthread_create(&thread, NULL, resync_worker, sp) != 0) {
+    pthread_mutex_lock(&resync_mu);
+    resync_pending = 0;
+    pthread_mutex_unlock(&resync_mu);
+    return;
+  }
+  pthread_detach(thread);
+}
+
 int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr, const uint8_t *payload,
                        size_t len) {
   smr_entry_t entry;
   ack_t ack;
   uint8_t next[MAX_CONTROL_PAYLOAD_SZ];
+  uint8_t tid[SMR_TRSC_ID_SIZE];
+  uint64_t index;
+  uint64_t expected;
+  struct pollfd pfd;
   msg_t msg;
   int ok;
+  int hole;
+  int ready;
   int commit;
 
   if (!sp || !hdr || !payload || conn < 0) {
@@ -1397,28 +1529,74 @@ int smr_ingest_prepare(struct superpeer *sp, int conn, const pl_header *hdr, con
     send_error(conn, hdr, &sp->self_id, 1, "malformed PREPARE");
     return 0;
   }
+  memcpy(tid, entry.transaction_id, SMR_TRSC_ID_SIZE);
+  index = entry.log_index;
   pthread_mutex_lock(&sp->metadata_lock);
   pthread_mutex_lock(&sp->smr_lock);
   ok = smr_prepare_vote(&sp->smr, &entry);
+  hole = !ok && smr_vote_hole(&sp->smr, &entry);
+  expected = sp->smr.last_applied + 1;
   pthread_mutex_unlock(&sp->smr_lock);
   pthread_mutex_unlock(&sp->metadata_lock);
   metadata_release(&entry.stored);
   if (!ok) {
     printf("NO\n");
+    if (hole) {
+      printf("log hole: PREPARE LogIndex %llu, expected %llu\n", (unsigned long long)index,
+             (unsigned long long)expected);
+    }
     fflush(stdout);
     send_error(conn, hdr, &sp->self_id, 1, "NO");
+    if (hole) {
+      /* Este nó perdeu COMMITs. Sem o IST, todo PREPARE seguinte também seria NO. */
+      schedule_resync(sp);
+    }
     return 0;
   }
   memset(&ack, 0, sizeof ack);
   memcpy(ack.node_id, sp->self_id.bytes, NODE_ID_SIZE);
   if (send_ack(conn, hdr, &sp->self_id, &ack) != NET_OK) {
+    /* O coordenador não ficou com o YES: o slot não pode esperar uma decisão que não vem. */
+    schedule_resync(sp);
     return 0;
   }
   printf("YES\n");
   fflush(stdout);
 
-  msg = recv_message(conn, next, sizeof next, NULL, 0);
+  /* Espera a decisão no mesmo socket. Silêncio longo não aborta: pergunta ao coordenador. */
+  net_set_timeout(conn, SMR_IO_TIMEOUT_MS);
+  pfd.fd = conn;
+  pfd.events = POLLIN;
+  for (;;) {
+    pfd.revents = 0;
+    ready = poll(&pfd, 1, SMR_DECISION_POLL_MS);
+    if (ready < 0 && errno == EINTR) {
+      continue;
+    }
+    if (ready != 0) {
+      break;
+    }
+    {
+      tx_view_t mine;
+
+      read_local_view(sp, &mine);
+      if (!mine.has_prepared || mine.index != index || memcmp(mine.tid, tid, SMR_TRSC_ID_SIZE) != 0) {
+        return 0; /* outra via (recuperação do líder, resync) já fechou o slot */
+      }
+    }
+    if (settle_with_coordinator(sp, tid, index) != SETTLE_PENDING) {
+      return 0;
+    }
+  }
+  if (ready > 0) {
+    msg = recv_message(conn, next, sizeof next, NULL, 0);
+  } else {
+    memset(&msg, 0, sizeof msg);
+    msg.status = NET_ERROR;
+  }
   if (msg.status != NET_OK || (msg.header.msg_type != COMMIT && msg.header.msg_type != ABORT)) {
+    /* Conexão caiu depois do YES: o desfecho se descobre com o coordenador, não com este socket. */
+    schedule_resync(sp);
     return 0;
   }
   commit = msg.header.msg_type == COMMIT;
