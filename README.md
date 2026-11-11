@@ -89,4 +89,4 @@ Os headers ficam em `include/`; as implementações ficam em `src/`. A lógica d
 
 ### `tests/` e `scripts/`
 
-Os testes seguem a mesma divisão common / peer / superpeer, mais `tests/integration/` para cenários multi-processo (lookup do Chord, `kill -9`, eleição, IST). Os scripts de demo do checkpoint 6 ficam em `scripts/demo/`.
+Os testes seguem a mesma divisão common / peer / superpeer, mais `tests/integration/` para cenários multi-processo (lookup do Chord, `kill -9`, eleição, IST). Os scripts de demo do checkpoint 6 ficam em `scripts/demo/`. O harness que sobe Super Peers e clientes em várias máquinas por ssh, com clientes persistentes, está em `tests/cluster/` (guia em `tests/cluster/README.md`).
