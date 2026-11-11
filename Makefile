@@ -30,7 +30,8 @@ PEER_OBJS = \
 	$(OBJ_DIR)/peer/download.o \
 	$(OBJ_DIR)/peer/replica.o \
 	$(OBJ_DIR)/peer/file_pipeline.o \
-	$(OBJ_DIR)/peer/storage.o
+	$(OBJ_DIR)/peer/storage.o \
+	$(OBJ_DIR)/peer/session.o
 
 # Executáveis a gerar
 TARGETS = $(BIN_DIR)/superpeer $(BIN_DIR)/node $(BIN_DIR)/client
@@ -41,6 +42,7 @@ TEST_METADATA = $(BIN_DIR)/test_metadata
 TEST_COMPRESSION = $(BIN_DIR)/test_compression
 TEST_FILE_PIPELINE = $(BIN_DIR)/test_file_pipeline
 TEST_STORAGE = $(BIN_DIR)/test_storage
+TEST_SESSION = $(BIN_DIR)/test_session
 TEST_UPLOAD = $(BIN_DIR)/test_upload
 TEST_DOWNLOAD = $(BIN_DIR)/test_download
 TEST_CHUNK_WIRE = $(BIN_DIR)/test_chunk_wire
@@ -57,7 +59,7 @@ TEST_UTILS_OBJ = $(OBJ_DIR)/tests/utils/test_utils.o
 # Alvo padrão: cria os diretórios e gera tudo
 all: $(BIN_DIR) $(OBJ_DIR) $(TARGETS)
 
-test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC) $(TEST_IST) $(TEST_LFU) $(TEST_NETWORK)
+test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMPRESSION) $(TEST_FILE_PIPELINE) $(TEST_STORAGE) $(TEST_SESSION) $(TEST_UPLOAD) $(TEST_DOWNLOAD) $(TEST_CHUNK_WIRE) $(TEST_CHUNK_SERVICE) $(TEST_CHORD) $(TEST_CHORD_RING) $(TEST_SMR) $(TEST_2PC) $(TEST_IST) $(TEST_LFU) $(TEST_NETWORK)
 	$(TEST_NODE)
 	$(TEST_CONFIG)
 	$(TEST_SUPERPEER)
@@ -65,6 +67,7 @@ test: $(TEST_NODE) $(TEST_CONFIG) $(TEST_SUPERPEER) $(TEST_METADATA) $(TEST_COMP
 	$(TEST_COMPRESSION)
 	$(TEST_FILE_PIPELINE)
 	$(TEST_STORAGE)
+	$(TEST_SESSION)
 	$(TEST_UPLOAD)
 	$(TEST_DOWNLOAD)
 	$(TEST_CHUNK_WIRE)
@@ -112,6 +115,9 @@ $(BIN_DIR)/test_file_pipeline: tests/peer/test_file_pipeline.c $(OBJ_DIR)/peer/f
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_storage: tests/peer/test_storage.c $(OBJ_DIR)/peer/storage.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(BIN_DIR)/test_session: tests/peer/test_session.c $(OBJ_DIR)/peer/session.o $(TEST_UTILS_OBJ) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@
 
 $(BIN_DIR)/test_upload: tests/peer/test_upload.c $(OBJ_DIR)/peer/upload.o $(OBJ_DIR)/peer/file_pipeline.o $(OBJ_DIR)/peer/storage.o $(OBJ_DIR)/common/compression.o $(OBJ_DIR)/common/node.o $(OBJ_DIR)/common/protocol.o $(OBJ_DIR)/common/network.o $(TEST_UTILS_OBJ) | $(BIN_DIR)

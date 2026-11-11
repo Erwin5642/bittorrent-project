@@ -13,7 +13,9 @@
 #include "../../include/peer/upload.h"
 #include "../../include/peer/download.h"
 #include "../../include/peer/replica.h"
+#include "../../include/peer/session.h"
 
+#include <errno.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdint.h>
@@ -22,6 +24,7 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 
 typedef struct {
@@ -173,13 +176,25 @@ static int store_to_superpeer(const peer_t *self, const char *host, uint16_t por
 	return ok;
 }
 
+/* Modo sessão: a identidade nasce uma vez e vale para todos os comandos. */
+static int g_session = 0;
+static int g_have_identity = 0;
+static peer_t g_identity;
+static node_config_t g_identity_cfg;
+
 /* Identidade do peer: usa o .conf se houver, senão gera um NodeID efêmero. */
 static void peer_identity(peer_t *self, node_config_t *cfg, const char *conf) {
 	node_uuid_t uuid;
 	const char *path = conf ? conf : PEER_CONF;
 
-	if (peer_init(self, path) && node_config_load(path, cfg))
+	if (g_session && g_have_identity) {
+		*self = g_identity;
+		*cfg = g_identity_cfg;
 		return;
+	}
+
+	if (peer_init(self, path) && node_config_load(path, cfg))
+		goto done;
 
 	/* Sem config: identidade efêmera, sem bootstrap. */
 	memset(cfg, 0, sizeof *cfg);
@@ -187,6 +202,13 @@ static void peer_identity(peer_t *self, node_config_t *cfg, const char *conf) {
 	self->type = PEER;
 	if (node_uuid_random(&uuid))
 		node_id_generate(0, 0, &uuid, &self->node_id);
+
+done:
+	if (g_session) {
+		g_identity = *self;
+		g_identity_cfg = *cfg;
+		g_have_identity = 1;
+	}
 }
 
 /* Estado da transferência (CP5), uma linha por transição. */
@@ -577,106 +599,39 @@ static int cmd_lookup(const char *object_id, const char *host, long port) {
 	return 0;
 }
 
-int main(int argc, char* argv[]){
-	const char *cmd  = NULL;
+/* Comandos de controle do CP1: ping, join e leave. Exigem host e porta. */
+static int cmd_control(const char *cmd, const char *conf, const char *host, long port) {
+    int32_t type;
+    peer_t self;
+    int fd;
+    int rc;
+    uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
+    uint8_t reply_payload[MAX_CONTROL_PAYLOAD_SZ];
+    char reply_struct[sizeof(ack_t) > sizeof(error_t)
+                      ? sizeof(ack_t) : sizeof(error_t)];
+    msg_t r;
 
-	/* Peer fechado devolve EPIPE no send; nao mata o processo. */
-	signal(SIGPIPE, SIG_IGN);
-
-    const char *host = "127.0.0.1";
-    const char *file = NULL;
-    const char *name = NULL;
-    const char *output = NULL;
-    const char *conf = NULL;
-    const char *object_id = NULL;
-    const char *value = NULL;
-    long port = 0;
-
-    static struct option long_opts[] = {
-        {"cmd",       required_argument, NULL, 'c'},
-        {"host",      required_argument, NULL, 'h'},
-        {"port",      required_argument, NULL, 'p'},
-        {"file",      required_argument, NULL, 'f'},
-        {"name",      required_argument, NULL, 'n'},
-        {"output",    required_argument, NULL, 'o'},
-        {"config",    required_argument, NULL, 'g'},
-        {"object-id", required_argument, NULL, 'i'},
-        {"value",     required_argument, NULL, 'v'},
-        {NULL,        0,                 NULL,  0 }
-    };
-
-    int opt;
-    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:i:v:", long_opts, NULL)) != -1) {
-        switch (opt) {
-        case 'c': cmd = optarg; break;
-        case 'h': host = optarg; break;
-        case 'f': file = optarg; break;
-        case 'n': name = optarg; break;
-        case 'o': output = optarg; break;
-        case 'g': conf = optarg; break;
-        case 'i': object_id = optarg; break;
-        case 'v': value = optarg; break;
-        case 'p': {
-            char *end;
-            port = strtol(optarg, &end, 10);
-            if (*end != '\0' || port < 1 || port > 65535) {
-                fprintf(stderr, "porta invalida: %s\n", optarg);
-                return 1;
-            }
-            break;
-        }
-        default:
-            fprintf(stderr, "uso: %s --cmd <upload|download|put|state|ping|join|leave|lookup> ...\n", argv[0]);
-            return 1;
-        }
-    }
-
-    if (!cmd) {
-        fprintf(stderr, "uso: %s --cmd <upload|download|put|state|ping|join|leave|lookup> ...\n", argv[0]);
-        return 1;
-    }
-
-    /* Subcomandos de arquivo do CP2. Sem --port, usam o bootstrap do .conf. */
-    if (strcmp(cmd, "upload") == 0)
-        return cmd_upload(file, conf, host, port);
-    if (strcmp(cmd, "download") == 0)
-        return cmd_download(name, output, conf, host, port);
-    if (strcmp(cmd, "lookup") == 0) {
-        if (name && !object_id)
-            return cmd_lookup_name(name, host, port);
-        return cmd_lookup(object_id, host, port);
-    }
-    if (strcmp(cmd, "put") == 0)
-        return cmd_put(name, value, conf, host, port);
-    if (strcmp(cmd, "state") == 0)
-        return cmd_state(host, port);
-
-    /* Comandos de controle do CP1 (ping/join/leave) exigem host/porta. */
     if (port == 0) {
-        fprintf(stderr, "uso: %s --cmd <ping|join|leave> --host <ip> --port <porta>\n", argv[0]);
+        fprintf(stderr, "uso: --cmd <ping|join|leave> --host <ip> --port <porta>\n");
         return 1;
     }
 
     printf("cmd=%s host=%s port=%ld\n", cmd, host, port);
 
-    int32_t type = cmd_to_type(cmd);
+    type = cmd_to_type(cmd);
     if (type < 0) {
         fprintf(stderr, "cmd invalido: %s\n", cmd);
         return 1;
     }
 
-    peer_t self;
     if (!peer_init(&self, conf ? conf : PEER_CONF))
         return 1;
 
-    int fd = net_connect(host, (uint16_t)port);
+    fd = net_connect(host, (uint16_t)port);
     if (fd < 0)
         return 1;
 
     /* Monta o payload conforme o comando e envia via send_message. */
-    uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD_SZ];
-    int rc;
-
     switch (type) {
     case PING: {
         pl_header h;
@@ -716,12 +671,8 @@ int main(int argc, char* argv[]){
     printf("TX %s\n", message_type_name((uint16_t)type));
 
     /* Le a resposta (ACK/ERROR/...) e imprime o tipo recebido. */
-    uint8_t reply_payload[MAX_CONTROL_PAYLOAD_SZ];
-    char reply_struct[sizeof(ack_t) > sizeof(error_t)
-                      ? sizeof(ack_t) : sizeof(error_t)];
-
-    msg_t r = recv_message(fd, reply_payload, sizeof reply_payload, reply_struct,
-                           sizeof reply_struct);
+    r = recv_message(fd, reply_payload, sizeof reply_payload, reply_struct,
+                     sizeof reply_struct);
     net_close(fd);
 
     if (r.status != NET_OK)
@@ -729,4 +680,350 @@ int main(int argc, char* argv[]){
 
     printf("RX %s\n", message_type_name((uint16_t)r.header.msg_type));
     return 0;
+}
+
+/* ---- Modo sessão (CP6): o cliente fica aberto e lê comandos, um por linha ---- */
+
+/* SIGTERM e SIGINT pedem o fim da sessão; o comando em curso termina antes. */
+static volatile sig_atomic_t g_stop = 0;
+
+static void on_stop_signal(int sig) {
+    (void)sig;
+    g_stop = 1;
+}
+
+typedef struct {
+    const char *conf;  /* .conf do peer (identidade e bootstrap) */
+    const char *host;  /* Super Peer padrão, valido com port != 0 */
+    long port;         /* 0 = usar o bootstrap do .conf */
+} session_t;
+
+/* Super Peer padrão da sessão: --host/--port ou o primeiro bootstrap que responder. */
+static int session_endpoint(const session_t *s, char *host, size_t cap, long *port) {
+    node_config_t cfg;
+    uint16_t p = 0;
+
+    memset(&cfg, 0, sizeof cfg);
+    if (s->conf)
+        node_config_load(s->conf, &cfg);
+    if (!peer_endpoint(&cfg, s->host, s->port, host, cap, &p)) {
+        fprintf(stderr, "sessao: sem Super Peer (use --port ou bootstrap no .conf)\n");
+        return 0;
+    }
+    *port = p;
+    return 1;
+}
+
+static int is_port_text(const char *text, long *out) {
+    char *end;
+    long v = strtol(text, &end, 10);
+
+    if (*text == '\0' || *end != '\0' || v < 1 || v > 65535)
+        return 0;
+    *out = v;
+    return 1;
+}
+
+/* host e porta explícitos (argv[from], argv[from+1]) ou o padrão da sessão. */
+static int session_target(const session_t *s, int argc, char **argv, int from,
+                          char *host, size_t cap, long *port) {
+    if (argc == from)
+        return session_endpoint(s, host, cap, port);
+    if (argc == from + 2 && is_port_text(argv[from + 1], port)) {
+        snprintf(host, cap, "%s", argv[from]);
+        return 1;
+    }
+    fprintf(stderr, "sessao: esperava [host porta] depois de %s\n", argv[0]);
+    return 0;
+}
+
+static void session_help(void) {
+    printf("Comandos:\n"
+           "  upload <arquivo>\n"
+           "  download <nome> <saida>\n"
+           "  lookup <nome|object-id>\n"
+           "  put <nome> <valor...>\n"
+           "  state [host porta]\n"
+           "  ping|join|leave [host porta]\n"
+           "  sleep <segundos>\n"
+           "  help | quit\n");
+}
+
+static void session_sleep(long seconds) {
+    long waited_ms = 0;
+
+    while (waited_ms < seconds * 1000 && !g_stop) {
+        pause_ms(100);
+        waited_ms += 100;
+    }
+}
+
+/* Executa um comando já separado em tokens. Devolve o código que iria no exit. */
+static int session_exec(const session_t *s, int argc, char **argv) {
+    const char *cmd = argv[0];
+    char host[INET_ADDRSTRLEN];
+    long port = 0;
+
+    if (strcmp(cmd, "upload") == 0 && argc == 2)
+        return cmd_upload(argv[1], s->conf, s->host, s->port);
+    if (strcmp(cmd, "download") == 0 && argc == 3)
+        return cmd_download(argv[1], argv[2], s->conf, s->host, s->port);
+    if (strcmp(cmd, "lookup") == 0 && argc == 2) {
+        uint8_t key[NODE_ID_SIZE];
+
+        if (!session_endpoint(s, host, sizeof host, &port))
+            return 1;
+        if (parse_object_id(argv[1], key))
+            return cmd_lookup(argv[1], host, port);
+        return cmd_lookup_name(argv[1], host, port);
+    }
+    if (strcmp(cmd, "put") == 0 && argc >= 3) {
+        char value[MAX_CONTROL_PAYLOAD_SZ];
+        size_t used = 0;
+        int i;
+
+        value[0] = '\0';
+        for (i = 2; i < argc; i++) {
+            int n = snprintf(value + used, sizeof value - used, "%s%s", i > 2 ? " " : "", argv[i]);
+
+            if (n < 0 || (size_t)n >= sizeof value - used) {
+                fprintf(stderr, "put: valor longo demais\n");
+                return 1;
+            }
+            used += (size_t)n;
+        }
+        return cmd_put(argv[1], value, s->conf, s->host, s->port);
+    }
+    if (strcmp(cmd, "state") == 0 && (argc == 1 || argc == 3)) {
+        if (!session_target(s, argc, argv, 1, host, sizeof host, &port))
+            return 1;
+        return cmd_state(host, port);
+    }
+    if (cmd_to_type(cmd) >= 0 && (argc == 1 || argc == 3)) {
+        if (!session_target(s, argc, argv, 1, host, sizeof host, &port))
+            return 1;
+        return cmd_control(cmd, s->conf, host, port);
+    }
+    if (strcmp(cmd, "sleep") == 0 && argc == 2) {
+        long seconds;
+
+        if (!is_port_text(argv[1], &seconds) && strcmp(argv[1], "0") != 0) {
+            fprintf(stderr, "sleep: segundos invalidos: %s\n", argv[1]);
+            return 1;
+        }
+        session_sleep(strcmp(argv[1], "0") == 0 ? 0 : seconds);
+        return 0;
+    }
+    fprintf(stderr, "sessao: comando desconhecido ou argumentos errados: %s (digite help)\n", cmd);
+    return 1;
+}
+
+/* Lê comandos de @p in até quit, EOF ou sinal. Cada comando termina com
+   "[done N rc=R]", que é o sinal de fim e o resultado para quem controla a sessão.
+   Com stop_on_error, o primeiro rc != 0 encerra (modo batch). */
+static int run_session(FILE *in, const session_t *s, int prompt, int stop_on_error) {
+    char line[SESSION_LINE_MAX];
+    char *argv[SESSION_ARGV_MAX];
+    unsigned seq = 0;
+    int failed = 0;
+
+    while (!g_stop) {
+        int argc;
+        int rc;
+
+        if (prompt) {
+            fputs("client> ", stdout);
+            fflush(stdout);
+        }
+        if (!fgets(line, sizeof line, in)) {
+            if (ferror(in) && errno == EINTR) {
+                clearerr(in);
+                continue;
+            }
+            break;
+        }
+        if (strchr(line, '\n') == NULL && !feof(in)) {
+            int c;
+
+            while ((c = fgetc(in)) != EOF && c != '\n')
+                ;
+            seq++;
+            fprintf(stderr, "sessao: linha longa demais\n");
+            printf("[done %u rc=1]\n", seq);
+            fflush(stdout);
+            continue;
+        }
+
+        argc = session_split(line, argv, SESSION_ARGV_MAX);
+        if (argc == 0)
+            continue;
+        seq++;
+        if (argc < 0) {
+            fprintf(stderr, "sessao: linha invalida (aspas ou tokens demais)\n");
+            rc = 1;
+        } else if (strcmp(argv[0], "quit") == 0 || strcmp(argv[0], "exit") == 0) {
+            break;
+        } else if (strcmp(argv[0], "help") == 0) {
+            session_help();
+            rc = 0;
+        } else {
+            rc = session_exec(s, argc, argv);
+        }
+        fflush(stdout);
+        fflush(stderr);
+        printf("[done %u rc=%d]\n", seq, rc);
+        fflush(stdout);
+        if (rc != 0) {
+            failed = 1;
+            if (stop_on_error)
+                break;
+        }
+    }
+    printf("[bye]\n");
+    fflush(stdout);
+    return failed;
+}
+
+/* --interactive e --batch: identidade única, marcadores e laço de comandos. */
+static int start_session(const char *conf, const char *host, long port,
+                         const char *batch_file, int keep_going) {
+    session_t s;
+    FILE *in = stdin;
+    peer_t self;
+    node_config_t cfg;
+    struct sigaction sa;
+    int interactive = (batch_file == NULL);
+    int rc;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    /* sem SA_RESTART: o fgets parado em leitura volta com EINTR e a sessão fecha */
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
+    g_session = 1;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (batch_file && strcmp(batch_file, "-") != 0) {
+        in = fopen(batch_file, "r");
+        if (!in) {
+            fprintf(stderr, "batch: nao abriu %s\n", batch_file);
+            return 1;
+        }
+    }
+
+    s.conf = conf;
+    s.host = host;
+    s.port = port;
+    peer_identity(&self, &cfg, conf);
+    printf("[ready]\n");
+    fflush(stdout);
+
+    rc = run_session(in, &s, interactive && isatty(STDIN_FILENO), !interactive && !keep_going);
+    if (in != stdin)
+        fclose(in);
+    return rc;
+}
+
+int main(int argc, char* argv[]){
+	const char *cmd  = NULL;
+
+	/* Peer fechado devolve EPIPE no send; nao mata o processo. */
+	signal(SIGPIPE, SIG_IGN);
+
+    const char *host = "127.0.0.1";
+    const char *file = NULL;
+    const char *name = NULL;
+    const char *output = NULL;
+    const char *conf = NULL;
+    const char *object_id = NULL;
+    const char *value = NULL;
+    const char *batch_file = NULL;
+    int interactive = 0;
+    int keep_going = 0;
+    long port = 0;
+
+    static struct option long_opts[] = {
+        {"cmd",         required_argument, NULL, 'c'},
+        {"host",        required_argument, NULL, 'h'},
+        {"port",        required_argument, NULL, 'p'},
+        {"file",        required_argument, NULL, 'f'},
+        {"name",        required_argument, NULL, 'n'},
+        {"output",      required_argument, NULL, 'o'},
+        {"config",      required_argument, NULL, 'g'},
+        {"object-id",   required_argument, NULL, 'i'},
+        {"value",       required_argument, NULL, 'v'},
+        {"interactive", no_argument,       NULL, 'I'},
+        {"batch",       required_argument, NULL, 'b'},
+        {"keep-going",  no_argument,       NULL, 'k'},
+        {NULL,          0,                 NULL,  0 }
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "c:h:p:f:n:o:g:i:v:Ib:k", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'c': cmd = optarg; break;
+        case 'h': host = optarg; break;
+        case 'f': file = optarg; break;
+        case 'n': name = optarg; break;
+        case 'o': output = optarg; break;
+        case 'g': conf = optarg; break;
+        case 'i': object_id = optarg; break;
+        case 'v': value = optarg; break;
+        case 'I': interactive = 1; break;
+        case 'b': batch_file = optarg; break;
+        case 'k': keep_going = 1; break;
+        case 'p': {
+            char *end;
+            port = strtol(optarg, &end, 10);
+            if (*end != '\0' || port < 1 || port > 65535) {
+                fprintf(stderr, "porta invalida: %s\n", optarg);
+                return 1;
+            }
+            break;
+        }
+        default:
+            fprintf(stderr, "uso: %s --cmd <upload|download|put|state|ping|join|leave|lookup> ...\n"
+                            "     %s --interactive | --batch <arquivo|-> [--keep-going] [--config <conf>] [--port <porta>]\n",
+                    argv[0], argv[0]);
+            return 1;
+        }
+    }
+
+    /* Modo sessão (CP6): fica aberto lendo comandos da stdin ou de um arquivo. */
+    if (interactive || batch_file) {
+        if (interactive && batch_file) {
+            fprintf(stderr, "use --interactive ou --batch, nao os dois\n");
+            return 1;
+        }
+        if (cmd) {
+            fprintf(stderr, "--cmd nao se combina com --interactive/--batch\n");
+            return 1;
+        }
+        return start_session(conf, host, port, batch_file, keep_going);
+    }
+
+    if (!cmd) {
+        fprintf(stderr, "uso: %s --cmd <upload|download|put|state|ping|join|leave|lookup> ...\n", argv[0]);
+        return 1;
+    }
+
+    /* Subcomandos de arquivo do CP2. Sem --port, usam o bootstrap do .conf. */
+    if (strcmp(cmd, "upload") == 0)
+        return cmd_upload(file, conf, host, port);
+    if (strcmp(cmd, "download") == 0)
+        return cmd_download(name, output, conf, host, port);
+    if (strcmp(cmd, "lookup") == 0) {
+        if (name && !object_id)
+            return cmd_lookup_name(name, host, port);
+        return cmd_lookup(object_id, host, port);
+    }
+    if (strcmp(cmd, "put") == 0)
+        return cmd_put(name, value, conf, host, port);
+    if (strcmp(cmd, "state") == 0)
+        return cmd_state(host, port);
+
+    /* Comandos de controle do CP1 (ping/join/leave) exigem host/porta. */
+    return cmd_control(cmd, conf, host, port);
 }
