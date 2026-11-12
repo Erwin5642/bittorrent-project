@@ -230,6 +230,14 @@ node_kill() {
 
 node_alive() { rrun "${NODE_HOST[$1]}" alive "$1" >/dev/null; }
 
+# Roda `bin/client --cmd state` no host do nó (cliente de um comando só) e imprime a saída.
+node_state_text() {
+    local name="$1" h abs
+    h="${NODE_HOST[$name]}"
+    abs="$(host_abs "$h")"
+    REXEC_TIMEOUT=20 rexec "$h" "'$abs/bin/client' --cmd state --host '$(node_ip "$name")' --port ${NODE_PORT[$name]}"
+}
+
 # Zera o estado de uma execução anterior e prepara os hosts. Não sobe nada.
 cluster_reset() {
     local h name

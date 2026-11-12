@@ -144,16 +144,6 @@ wait_any_log() {
     die "tempo esgotado (${timeout}s): $desc. Padrão: $pattern"
 }
 
-# --- estado do Super Peer ----------------------------------------------
-
-# Roda `bin/client --cmd state` no host do nó (cliente de um comando só) e imprime a saída.
-node_state_text() {
-    local name="$1" h abs
-    h="${NODE_HOST[$name]}"
-    abs="$(host_abs "$h")"
-    REXEC_TIMEOUT=20 rexec "$h" "'$abs/bin/client' --cmd state --host '$(node_ip "$name")' --port ${NODE_PORT[$name]}"
-}
-
 # cl_assert_state <SP> <LogIndex> <Objects> <nomes...>
 cl_assert_state() {
     local name="$1" index="$2" objects="$3" text n

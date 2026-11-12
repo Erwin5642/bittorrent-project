@@ -15,6 +15,8 @@ source "$CLUSTER_SH_DIR/lib/transport.sh"
 source "$CLUSTER_SH_DIR/lib/node.sh"
 # shellcheck source=lib/client.sh
 source "$CLUSTER_SH_DIR/lib/client.sh"
+# shellcheck source=lib/inspect.sh
+source "$CLUSTER_SH_DIR/lib/inspect.sh"
 
 usage() {
     cat <<'EOF'
@@ -45,6 +47,16 @@ Clientes (ficam abertos até serem fechados)
   client attach <nome>     digita direto na sessão do cliente
   client stop [nomes...]   envia quit
   client status            lista os clientes
+
+Inspeção dos Super Peers (nomes opcionais; padrão: todos)
+  overview [SP...]         uma linha por SP: processo, NodeID, sucessor, coordenador, LogIndex, membros
+  members [SP...]          tabela de membership: o que cada SP diz de cada membro (ALIVE/SUSPECT/FAILED)
+  chord [SP...] [--fingers]  anel por NodeID, sucessor real x esperado e finger table
+  coordinator [SP...]      quem cada SP reconhece como coordenador (Bully) e se concordam
+  state [SP...] [--files]  ao vivo (GET_STATE): LogIndex, objetos, cache LFU; --files lista arquivo x versão
+  metadata [filtro]        arquivo, tamanho, ObjectID e chunks registrados nos logs dos SPs
+  lookup <nome|oid> [SP]   caminho Chord até o dono do objeto, com os nomes dos SPs
+  events <SP> [cat] [N]    últimos N eventos (cat: membership election chord 2pc ist lfu log metadata all | regex)
 
 Observação
   console                  laço interativo (C1 upload x | @SP2 kill | status)
@@ -374,6 +386,14 @@ dispatch() {
     down) cmd_down ;;
     status) cmd_status "$@" ;;
     net) cmd_net ;;
+    overview) cmd_overview "$@" ;;
+    members) cmd_members "$@" ;;
+    chord) cmd_chord "$@" ;;
+    coordinator) cmd_coordinator "$@" ;;
+    state) cmd_state "$@" ;;
+    metadata) cmd_metadata "$@" ;;
+    lookup) cmd_lookup "$@" ;;
+    events) cmd_events "$@" ;;
     kill | stop | start | restart)
         [[ $# -ge 1 ]] || die_cli "uso: $cmd <nome>..."
         local n
