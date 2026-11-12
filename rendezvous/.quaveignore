@@ -1,0 +1,14 @@
+# Binário e artefatos de build (o Dockerfile compila a partir do rendezvous.c)
+rendezvous
+*.o
+*.core
+core
+
+# Controle de versão e arquivos locais
+.git
+.gitignore
+.dockerignore
+*.log
+*.swp
+.idea/
+.vscode/
