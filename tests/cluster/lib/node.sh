@@ -24,6 +24,10 @@ host_abs() {
         return 0
     fi
     abs="$(rexec "$h" "mkdir -p \"$(host_dir_expr "$h")\" && cd \"$(host_dir_expr "$h")\" && pwd")" || return 1
+    if [[ "$abs" != /* ]]; then
+        echo "host_abs: não consegui resolver o diretório do projeto em $h (saída: '$abs')" >&2
+        return 1
+    fi
     printf '%s' "$abs" >"$f"
     printf '%s' "$abs"
 }
