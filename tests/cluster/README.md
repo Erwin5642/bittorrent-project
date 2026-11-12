@@ -83,6 +83,44 @@ Limites que o `check` e a leitura do arquivo impõem:
 | `watch [cenário\|--console]` | Painéis em tmux |
 | `run <cenário>` | Executa `scenarios/<cenário>.sh` |
 | `exec <host> <cmd...>`, `logs <nome>`, `clean [--data]` | Depuração e limpeza |
+| `overview`, `members`, `chord`, `coordinator`, `state`, `metadata`, `lookup`, `events` | Inspeção dos Super Peers (abaixo) |
+
+## Inspeção dos Super Peers
+
+Estes comandos mostram o estado interno dos Super Peers. Nenhum mexe no código dos nós:
+leem os logs espelhados em `tests/cluster/logs` e, no caso de `state` e `lookup`, consultam
+o Super Peer ao vivo (`GET_STATE` e `LOOKUP`). Os nomes de Super Peer são opcionais; sem
+eles, valem todos.
+
+| Comando | O que mostra | Fonte |
+| --- | --- | --- |
+| `overview [SP...]` | Uma linha por Super Peer: processo vivo ou não, NodeID, sucessor, coordenador, último `LogIndex` e membros ALIVE/SUSPECT/FAILED | logs e ssh |
+| `members [SP...]` | Matriz observador x membro com o que a tabela de cada Super Peer diz de cada um | logs |
+| `chord [SP...] [--fingers]` | Anel por NodeID, sucessor que cada nó reporta contra o esperado (`ok` ou `DIVERGE`) e, com `--fingers`, a finger table em faixas | logs |
+| `coordinator [SP...]` | Quem cada Super Peer reconhece como coordenador, quantas eleições viu e se todos concordam | logs |
+| `state [SP...] [--files]` | `LogIndex`, objetos e métricas do cache LFU de cada Super Peer, com aviso de divergência. `--files` traz a matriz arquivo x versão | ao vivo |
+| `metadata [filtro]` | Arquivo, tamanho, ObjectID e chunks, e em que logs o registro apareceu | logs |
+| `lookup <nome\|object-id> [SP]` | Caminho Chord até o dono do objeto, com os nomes dos Super Peers. Pelo nome, o ObjectID sai dos logs de metadados | ao vivo |
+| `events <SP> [cat] [N]` | Últimos N eventos. `cat`: `membership`, `election`, `chord`, `2pc`, `ist`, `lfu`, `log`, `metadata`, `all` ou uma regex. Sem `cat`, esconde HEARTBEAT, GOSSIP, PING e finger | logs |
+
+```text
+tests/cluster/cluster.sh overview
+tests/cluster/cluster.sh state --files
+tests/cluster/cluster.sh chord --fingers SP1
+tests/cluster/cluster.sh events SP3 election
+tests/cluster/cluster.sh lookup documento_a.pdf SP2
+```
+
+Limites do que o Super Peer registra hoje:
+
+- **Membership.** A tabela de membros só vai para o log na partida e a cada `JOIN`
+  tratado, então só o Super Peer de bootstrap mostra a tabela completa. Depois da partida,
+  `members` acompanha as transições `SUSPECT` e `FAILED`, não as atualizações por gossip.
+  `-` na matriz quer dizer que aquele nó nunca imprimiu o membro.
+- **Chord.** O predecessor não é registrado. O sucessor e a finger table são os últimos
+  valores impressos; as entradas que nunca mudaram não aparecem.
+- **Chunks e réplicas.** Ficam no `peer`, não no Super Peer. `metadata` mostra só o que o
+  Super Peer registrou no momento do `UPLOAD`.
 
 ## Comandos do cliente
 

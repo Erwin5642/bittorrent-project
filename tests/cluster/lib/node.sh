@@ -24,6 +24,10 @@ host_abs() {
         return 0
     fi
     abs="$(rexec "$h" "mkdir -p \"$(host_dir_expr "$h")\" && cd \"$(host_dir_expr "$h")\" && pwd")" || return 1
+    if [[ "$abs" != /* ]]; then
+        echo "host_abs: não consegui resolver o diretório do projeto em $h (saída: '$abs')" >&2
+        return 1
+    fi
     printf '%s' "$abs" >"$f"
     printf '%s' "$abs"
 }
@@ -225,6 +229,14 @@ node_kill() {
 }
 
 node_alive() { rrun "${NODE_HOST[$1]}" alive "$1" >/dev/null; }
+
+# Roda `bin/client --cmd state` no host do nó (cliente de um comando só) e imprime a saída.
+node_state_text() {
+    local name="$1" h abs
+    h="${NODE_HOST[$name]}"
+    abs="$(host_abs "$h")"
+    REXEC_TIMEOUT=20 rexec "$h" "'$abs/bin/client' --cmd state --host '$(node_ip "$name")' --port ${NODE_PORT[$name]}"
+}
 
 # Zera o estado de uma execução anterior e prepara os hosts. Não sobe nada.
 cluster_reset() {

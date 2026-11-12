@@ -47,7 +47,7 @@ rexec() {
     # .bashrc ou motd barulhentos da máquina remota escreveriam antes do nosso comando
     # e estragariam qualquer saída capturada; tudo até o marcador é descartado.
     timeout "$REXEC_TIMEOUT" ssh "${args[@]}" "${HOST_TARGET[$h]}" "echo $SSH_BEGIN_MARK; $script" |
-        sed -u "1,/^$SSH_BEGIN_MARK\$/d"
+        sed -u -n "/^$SSH_BEGIN_MARK\$/,\${/^$SSH_BEGIN_MARK\$/!p}"
     rc="${PIPESTATUS[0]}"
     return "$rc"
 }
