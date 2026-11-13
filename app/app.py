@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import signal
 import time
@@ -36,6 +37,25 @@ from textual.widgets import (
 
 import node
 import tunnel as tn
+
+# Linha emitida pelo cliente durante o download: "Transfer <nome> PROGRESS <feitos> <total>".
+_PROGRESS = re.compile(r"^Transfer .+ PROGRESS (\d+) (\d+)$")
+_BAR_WIDTH = 12
+
+
+def progress_bar(done: int, total: int) -> str:
+    """Barra de texto, ex.: `████████░░░░ 62%`."""
+    pct = min(100, done * 100 // total) if total else 0
+    filled = pct * _BAR_WIDTH // 100
+    return f"[cyan]{'█' * filled}{'░' * (_BAR_WIDTH - filled)}[/] {pct}%"
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} B"
 
 
 def download_target(out: str, name: str) -> str:
@@ -86,7 +106,9 @@ class FormModal(ModalScreen["list[str] | None"]):
 
 
 class UploadModal(ModalScreen["str | None"]):
-    """Escolhe um arquivo da máquina (a partir da home) ou digita o caminho."""
+    """Escolhe um arquivo ou uma pasta da máquina (a partir da home) ou digita o caminho.
+
+    Uma pasta é compactada em `<pasta>.zip` e o zip é enviado (ver BitTorrentApp.begin_upload)."""
 
     DEFAULT_CSS = """
     UploadModal { align: center middle; }
@@ -99,9 +121,10 @@ class UploadModal(ModalScreen["str | None"]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("[b]Upload[/b] — escolha um arquivo ou digite o caminho")
+            yield Label("[b]Upload[/b] — escolha um arquivo ou uma pasta (a pasta é enviada como .zip)")
             yield DirectoryTree(str(Path.home()))
-            yield Input(placeholder="/caminho/do/arquivo", id="path")
+            yield Input(placeholder="/caminho/do/arquivo ou da pasta", id="path")
+            yield Static("", id="hint")
             with Horizontal():
                 yield Button("Cancelar", id="cancel")
                 yield Button("Enviar", id="ok", variant="primary")
@@ -109,6 +132,21 @@ class UploadModal(ModalScreen["str | None"]):
     @on(DirectoryTree.FileSelected)
     def _picked(self, event: DirectoryTree.FileSelected) -> None:
         self.query_one("#path", Input).value = str(event.path)
+
+    @on(DirectoryTree.DirectorySelected)
+    def _picked_dir(self, event: DirectoryTree.DirectorySelected) -> None:
+        self.query_one("#path", Input).value = str(event.path)
+
+    @on(Input.Changed, "#path")
+    def _hint(self, event: Input.Changed) -> None:
+        text = event.value.strip()
+        p = Path(text).expanduser() if text else None
+        hint = ""
+        if p is not None and p.is_dir():
+            hint = f"[yellow]pasta[/]: será compactada e enviada como [b]{node.safe_zip_name(p.resolve().name)}[/b]"
+        elif p is not None and p.is_file():
+            hint = "arquivo"
+        self.query_one("#hint", Static).update(hint)
 
     @on(Button.Pressed, "#ok")
     @on(Input.Submitted)
@@ -345,12 +383,26 @@ class BitTorrentApp(App):
         await self._stop_tunnel()
         await node.unregister(self.cfg)
 
+    def _kill_children_now(self) -> None:
+        """Último recurso na saída forçada: não deixa o Super Peer nem o cliente órfãos."""
+        for proc in (self.sp.proc, self.client.proc):
+            if proc is not None and proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
     async def action_quit(self) -> None:
-        if self._quitting:
+        if self._quitting:          # segundo Ctrl+Q: não espera mais
+            self._kill_children_now()
+            self.exit()
             return
         self._quitting = True
-        self._status("encerrando…")
-        await self.shutdown_node()
+        self._status("encerrando… (Ctrl+Q de novo força a saída)")
+        try:
+            await asyncio.wait_for(self.shutdown_node(), 20)
+        except asyncio.TimeoutError:
+            self._kill_children_now()
         self.exit()
 
     async def restart_node(self) -> None:
@@ -366,20 +418,42 @@ class BitTorrentApp(App):
             return False
         return True
 
-    def run_client(self, *cmd: str) -> None:
+    def run_client(self, *cmd: str, cleanup: Path | None = None) -> None:
         if not cmd or not self._need_client():
             return
         self._seq += 1
         key = f"r{self._seq}"
         self.query_one("#transfers", DataTable).add_row(
-            time.strftime("%H:%M:%S"), cmd[0], " ".join(cmd[1:]), "⏳ executando", key=key)
-        self.run_worker(self._client_job(list(cmd), key), group=f"cmd-{key}")
+            time.strftime("%H:%M:%S"), cmd[0], " ".join(cmd[1:]),
+            progress_bar(0, 1) if cmd[0] == "download" else "⏳ executando", key=key)
+        self.run_worker(self._client_job(list(cmd), key, cleanup), group=f"cmd-{key}")
 
-    async def _client_job(self, cmd: list[str], key: str) -> None:
+    async def _client_job(self, cmd: list[str], key: str, cleanup: Path | None = None) -> None:
         table = self.query_one("#transfers", DataTable)
         console = self.query_one("#console", RichLog)
-        console.write("$ " + " ".join(shlex.quote(c) for c in cmd))
-        rc, lines = await self.client.run(" ".join(shlex.quote(c) for c in cmd), console.write)
+        status_col = list(table.columns.keys())[3]
+        try:
+            line = " ".join(node.session_quote(c) for c in cmd)   # a sessão só entende aspas duplas
+        except ValueError as exc:
+            console.write(f"✘ {exc}")
+            table.update_cell(key, status_col, "[red]✘ argumento inválido[/]")
+            if cleanup:
+                cleanup.unlink(missing_ok=True)
+            return
+        console.write("$ " + line)
+
+        def on_line(out: str) -> None:
+            m = _PROGRESS.match(out)
+            if m:  # só atualiza a barra; não polui o console
+                table.update_cell(key, status_col, progress_bar(int(m.group(1)), int(m.group(2))))
+            else:
+                console.write(out)
+
+        try:
+            rc, lines = await self.client.run(line, on_line)
+        finally:
+            if cleanup:
+                cleanup.unlink(missing_ok=True)   # zip temporário de upload de pasta
         ok = rc == 0
         self._stats["ok" if ok else "erro"] += 1
         self.query_one("#summary", Static).update(
@@ -391,7 +465,35 @@ class BitTorrentApp(App):
 
     def action_upload(self) -> None:
         if self._need_client():
-            self.push_screen(UploadModal(), lambda p: p and self.run_client("upload", p))
+            self.push_screen(UploadModal(), lambda p: p and self.begin_upload(p))
+
+    def begin_upload(self, path: str) -> None:
+        """Arquivo: envia direto. Pasta: compacta num .zip (em outra thread) e envia o zip."""
+        base = Path(path).expanduser()
+        if not base.is_absolute():
+            base = node.CLIENT_DIR / base      # o cliente resolve caminhos relativos a data/client/
+        if base.is_dir():
+            self.run_worker(self._upload_dir(base), group="zip")
+        else:
+            self.run_client("upload", path)
+
+    async def _upload_dir(self, src: Path) -> None:
+        console = self.query_one("#console", RichLog)
+        self.notify(f"Compactando {src.name}…")
+        console.write(f"compactando a pasta {src} …")
+        try:
+            res = await asyncio.to_thread(node.zip_directory, src)
+        except (ValueError, OSError) as exc:
+            console.write(f"✘ não foi possível compactar: {exc}")
+            self.notify(f"Compactação falhou: {exc}", severity="error", timeout=10)
+            return
+        console.write(f"pasta compactada: {res.files} arquivo(s), {human_size(res.size_in)} → "
+                      f"{res.path.name} ({human_size(res.size_out)})")
+        for line in res.skipped[:5]:
+            console.write(f"  pulado: {line}")
+        if len(res.skipped) > 5:
+            console.write(f"  … e mais {len(res.skipped) - 5} pulado(s)")
+        self.run_client("upload", str(res.path), cleanup=res.path)
 
     def action_download(self) -> None:
         if not self._need_client():

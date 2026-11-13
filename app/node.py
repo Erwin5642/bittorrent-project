@@ -11,6 +11,8 @@ import os
 import re
 import signal
 import socket
+import time
+import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -23,6 +25,8 @@ DATA = Path(os.environ.get("BT_DATA_DIR", APP_DIR / "data"))
 SP_DIR = DATA / "superpeer"
 CLIENT_DIR = DATA / "client"
 CONFIG_FILE = DATA / "config.json"
+UPLOAD_DIR = CLIENT_DIR / "uploads"   # zips temporários de uploads de pasta
+ZIP_NAME_MAX = 200                    # o metadado aceita 256 caracteres no nome
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _DONE = re.compile(r"^\[done (\d+) rc=(-?\d+)\]$")
@@ -94,12 +98,24 @@ class Registration:
         self.peers = self.peers or []
 
 
-async def rdv(server: str, *args: str) -> tuple[int, list[str]]:
+RDV_TIMEOUT = 8.0   # o /dev/tcp do bash não tem prazo de conexão; sem isto, um rendezvous fora do ar trava o app
+
+
+async def rdv(server: str, *args: str, timeout: float = RDV_TIMEOUT) -> tuple[int, list[str]]:
     proc = await asyncio.create_subprocess_exec(
         "bash", str(RDV_SCRIPT), server, *args,
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
-    out, _ = await proc.communicate()
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return 3, [f"ERR sem resposta de {server} em {timeout:.0f} s"]
     return proc.returncode or 0, [clean(l) for l in out.decode(errors="replace").splitlines()]
 
 
@@ -125,7 +141,9 @@ async def register(cfg: Config) -> Registration:
 
 async def unregister(cfg: Config) -> None:
     if cfg.rendezvous:
-        await rdv(cfg.rendezvous, "unregister", str(cfg.sp_port), *([cfg.announce_ip] if cfg.announce_ip else []))
+        # cortesia ao servidor: não vale esperar muito por ele na saída
+        await rdv(cfg.rendezvous, "unregister", str(cfg.sp_port), *([cfg.announce_ip] if cfg.announce_ip else []),
+                  timeout=4.0)
 
 
 # ---------------------------------------------------------------------------
@@ -335,3 +353,85 @@ def parse_metrics(lines: list[str]) -> list[tuple[str, str]]:
         if m and not line.startswith("["):
             rows.append((m.group(1), m.group(2)))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Comandos do cliente e upload de pastas
+# ---------------------------------------------------------------------------
+
+
+def session_quote(arg: str) -> str:
+    """Cita um argumento para a sessão do cliente, que só entende aspas duplas (sem escape)."""
+    if arg and not any(c.isspace() for c in arg) and '"' not in arg and not arg.startswith("#"):
+        return arg
+    if '"' in arg or "\n" in arg or "\r" in arg:
+        raise ValueError(f"o argumento não pode conter aspas duplas nem quebra de linha: {arg!r}")
+    return f'"{arg}"'
+
+
+def safe_zip_name(dirname: str) -> str:
+    """`<pasta>.zip` sem aspas, barras invertidas nem caracteres de controle, com tamanho limitado."""
+    base = re.sub(r'["\\\x00-\x1f]+', "_", dirname).strip(" .") or "pasta"
+    return base[: ZIP_NAME_MAX - len(".zip")] + ".zip"
+
+
+@dataclass
+class ZipResult:
+    path: Path
+    files: int
+    skipped: list[str]
+    size_in: int
+    size_out: int
+
+
+def zip_directory(src: Path, dest_dir: Path = UPLOAD_DIR) -> ZipResult:
+    """Compacta uma pasta em `dest_dir/<nome da pasta>.zip` (o nome do zip vira o nome na rede).
+
+    Dentro do zip fica a pasta de topo (`<pasta>/...`). Links simbólicos e arquivos ilegíveis são
+    pulados e listados em `skipped`; pastas vazias viram entradas. Levanta ValueError se não houver
+    nenhum arquivo para enviar.
+    """
+    src = src.expanduser().resolve()
+    if not src.is_dir():
+        raise ValueError(f"não é uma pasta: {src}")
+    if src == src.parent:
+        raise ValueError("escolha uma pasta, não a raiz do sistema")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / safe_zip_name(src.name)
+    tmp = dest.with_name(dest.name + ".part")   # só vira .zip depois de pronto
+    files, size_in, skipped = 0, 0, []
+    now = time.localtime()[:6]
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for root, dirs, names in os.walk(src, followlinks=False):
+                root_p = Path(root)
+                dirs.sort()
+                names.sort()
+                for d in list(dirs):
+                    if (root_p / d).is_symlink():
+                        skipped.append(f"{root_p / d}: link simbólico")
+                        dirs.remove(d)
+                rel_root = root_p.relative_to(src.parent)
+                if not names and not dirs:
+                    info = zipfile.ZipInfo(f"{rel_root.as_posix()}/", date_time=now)
+                    info.external_attr = (0o40755 << 16) | 0x10
+                    z.writestr(info, b"")
+                for name in names:
+                    f = root_p / name
+                    if f == dest or f == tmp:
+                        continue                      # não inclui o próprio zip
+                    if f.is_symlink() or not f.is_file():
+                        skipped.append(f"{f}: link simbólico ou arquivo especial")
+                        continue
+                    try:
+                        z.write(f, arcname=(rel_root / name).as_posix())
+                        files += 1
+                        size_in += f.stat().st_size
+                    except OSError as exc:
+                        skipped.append(f"{f}: {exc.strerror or exc}")
+        if files == 0:
+            raise ValueError("a pasta não tem nenhum arquivo para enviar")
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return ZipResult(dest, files, skipped, size_in, dest.stat().st_size)
