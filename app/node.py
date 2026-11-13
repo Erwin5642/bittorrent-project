@@ -34,6 +34,7 @@ class Config:
     rendezvous: str = ""        # host:porta; vazio = não registra (Super Peer isolado)
     sp_port: int = 5100         # porta de escuta do Super Peer
     client_port: int = 9000     # identidade do cliente (ele não escuta)
+    punch_port: int = 5200      # porta local do túnel (hole punching e conversa com o rendezvous)
     announce_ip: str = ""       # vazio = o IP que o rendezvous enxerga (ou o IP local sem rendezvous)
 
     @classmethod
@@ -54,8 +55,10 @@ class Config:
         for name, p in (("porta do Super Peer", self.sp_port), ("porta do cliente", self.client_port)):
             if not 1 <= p <= 65535:
                 errs.append(f"{name} fora de 1–65535.")
-        if self.sp_port == self.client_port:
-            errs.append("As portas do Super Peer e do cliente precisam ser diferentes.")
+        if not 1 <= self.punch_port <= 65535:
+            errs.append("porta do túnel fora de 1–65535.")
+        if len({self.sp_port, self.client_port, self.punch_port}) < 3:
+            errs.append("As portas do Super Peer, do cliente e do túnel precisam ser diferentes.")
         if self.announce_ip and not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", self.announce_ip):
             errs.append("IP anunciado inválido.")
         return errs

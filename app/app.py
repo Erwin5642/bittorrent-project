@@ -34,6 +34,7 @@ from textual.widgets import (
 )
 
 import node
+import tunnel as tn
 
 
 class FormModal(ModalScreen["list[str] | None"]):
@@ -134,6 +135,7 @@ class BitTorrentApp(App):
         self.sp = node.SuperPeerProc()
         self.client = node.ClientSession()
         self.reg = node.Registration(False, message="ainda não registrado")
+        self.tunnel: tn.Tunnel | None = None
         self.ip = ""
         self._seq = 0
         self._stats = {"ok": 0, "erro": 0}
@@ -193,6 +195,8 @@ class BitTorrentApp(App):
                     yield Input(id="cfg-sp_port", restrict=r"\d*")
                     yield Label("Porta do cliente")
                     yield Input(id="cfg-client_port", restrict=r"\d*")
+                    yield Label("Porta do túnel (hole punching; também a porta local usada com o rendezvous)")
+                    yield Input(id="cfg-punch_port", restrict=r"\d*")
                     yield Label("IP anunciado (opcional; vazio = o IP que o rendezvous enxerga)")
                     yield Input(id="cfg-announce_ip", placeholder="ex.: 200.1.2.3")
                     with Horizontal(classes="bar"):
@@ -227,10 +231,13 @@ class BitTorrentApp(App):
         rdv = (f"[green]registrado como {self.reg.public}[/]" if self.reg.ok
                else f"[yellow]sem rendezvous[/] ({self.reg.message})")
         boot = ", ".join(self.reg.peers) if self.reg.peers else "nenhum (primeiro Super Peer)"
-        self._status(f"Super Peer: {sp}   Cliente: {cl}   Rendezvous: {rdv}\nBootstrap: {boot}")
+        up, known = self.tunnel.status() if self.tunnel else (0, 0)
+        tun = f"{up}/{known} túneis" if self.tunnel else "parado"
+        self._status(f"Super Peer: {sp}   Cliente: {cl}   Rendezvous: {rdv}   Túnel: {tun}\nBootstrap: {boot}")
         self.query_one("#sp-info", Static).update(
-            f"Endereço anunciado: [b]{self.ip or '—'}:{self.cfg.sp_port}[/b]   bootstrap: {boot}\n"
-            f"Config: {node.SP_DIR / 'sp.conf'}   Log: {self.sp.log_path}"
+            f"Endereço virtual anunciado: [b]{self.ip or '—'}:{self.cfg.sp_port}[/b]   "
+            f"id no rendezvous: {self.tunnel.me if self.tunnel else '—'}   túneis: {tun}\n"
+            f"Config: {node.SP_DIR / 'sp.conf'}   Log: {self.sp.log_path}   Túnel: {node.DATA / 'tunnel.log'}"
         )
 
     def _blocked(self, reason: str) -> None:
@@ -262,8 +269,29 @@ class BitTorrentApp(App):
             if not self.reg.ok:
                 self._blocked(f"Não foi possível usar o rendezvous {self.cfg.rendezvous}: {self.reg.message}")
                 return
-            self.ip = self.cfg.announce_ip or self.reg.public.rsplit(":", 1)[0]
-            peers = self.reg.peers
+            # O Super Peer só fala com endereços virtuais de loopback; o túnel leva o tráfego até os
+            # outros Super Peers por hole punching TCP. Ele precisa estar de pé antes do Super Peer.
+            self._status("abrindo o túnel (hole punching)…")
+            self.tunnel = tn.Tunnel(self.cfg.rendezvous, self.cfg.punch_port, self.cfg.sp_port,
+                                    self.cfg.announce_ip, on_event=self._tunnel_event)
+            err = await self.tunnel.start()
+            if err:
+                await self._stop_tunnel()
+                self._blocked(f"Túnel: {err}")
+                return
+            self.ip = tn.vip(self.tunnel.me or self.reg.public)
+            peers = []
+            if self.reg.peers:
+                for p in self.reg.peers:
+                    self.tunnel.ensure_node(p)
+                self._status(f"abrindo túnel com {len(self.reg.peers)} Super Peer(s)… (até 45 s)")
+                linked = await self.tunnel.wait_links(self.reg.peers, 45)
+                if not linked:
+                    await self._stop_tunnel()
+                    self._blocked("Nenhum Super Peer respondeu ao hole punching (ele está online? NAT simétrico? "
+                                  "veja app/data/tunnel.log). Para não criar uma rede separada, nada foi iniciado")
+                    return
+                peers = [f"{tn.vip(p)}:{tn.split_id(p)[1]}" for p in linked]
             sp_conf, peer_conf = node.write_confs(self.cfg, self.ip, peers)
             (node.CLIENT_DIR / "downloads").mkdir(parents=True, exist_ok=True)
             self._status("iniciando o Super Peer…")
@@ -280,9 +308,29 @@ class BitTorrentApp(App):
         finally:
             self._booting = False
 
+    async def _stop_tunnel(self) -> None:
+        if self.tunnel:
+            await self.tunnel.stop()
+            self.tunnel = None
+
+    def _tunnel_event(self, msg: str) -> None:
+        """Eventos do túnel vão para app/data/tunnel.log e para o painel de log."""
+        line = f"{time.strftime('%H:%M:%S')} {msg}"
+        try:
+            node.DATA.mkdir(parents=True, exist_ok=True)
+            with open(node.DATA / "tunnel.log", "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+        try:
+            self.query_one("#sp-log", RichLog).write("[túnel] " + msg)
+        except Exception:
+            pass
+
     async def shutdown_node(self) -> None:
         await self.client.stop()
         await self.sp.stop()
+        await self._stop_tunnel()
         await node.unregister(self.cfg)
 
     async def action_quit(self) -> None:
@@ -409,6 +457,8 @@ class BitTorrentApp(App):
         self._show_metrics("#sp-metrics", lines)
 
     def _tick(self) -> None:
+        if self.sp.alive or self.tunnel:
+            self._refresh_status()
         if self.query_one("#auto", Switch).value:
             self.refresh_metrics()
         if self.query_one("#sp-auto", Switch).value:
@@ -504,7 +554,7 @@ class BitTorrentApp(App):
     # --- configuração -------------------------------------------------------------------
 
     def _load_cfg_form(self) -> None:
-        for key in ("rendezvous", "sp_port", "client_port", "announce_ip"):
+        for key in ("rendezvous", "sp_port", "client_port", "punch_port", "announce_ip"):
             self.query_one(f"#cfg-{key}", Input).value = str(getattr(self.cfg, key))
 
     def _form_cfg(self) -> node.Config:
@@ -516,6 +566,7 @@ class BitTorrentApp(App):
             rendezvous=self.query_one("#cfg-rendezvous", Input).value.strip(),
             sp_port=num("sp_port", 0),
             client_port=num("client_port", 0),
+            punch_port=num("punch_port", 0),
             announce_ip=self.query_one("#cfg-announce_ip", Input).value.strip(),
         )
 

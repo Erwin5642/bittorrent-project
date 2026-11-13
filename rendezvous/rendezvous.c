@@ -9,6 +9,12 @@
  *   UNREGISTER <porta> [ip] -> OK
  *   LIST                    -> PEER <ip>:<porta> (todos) | END
  *   PING                    -> PONG
+ *   PUNCH <porta> [ip]      -> OK <ip>:<porta> <ip_ext>:<porta_ext> | NODE <ip>:<porta> <ip_ext>:<porta_ext> | END
+ *                              (registra/renova como REGISTER e guarda o endereço EXTERNO desta conexão,
+ *                               que é onde o NAT abriu o mapeamento; devolve os outros nós com endereço externo)
+ *   WHOAMI                  -> OK <ip>:<porta>   (endereço externo desta conexão, porta incluída)
+ *   PROBE <rotulo>          -> OK <ip>:<porta> | PEER <rotulo> <ip>:<porta> (outros rótulos) | END
+ *                              (teste de hole punching: guarda o endereço externo observado)
  *   erro                    -> ERR <motivo>
  *
  * REGISTER também renova o registro (TTL). O [ip] opcional substitui o IP visto na conexão
@@ -43,9 +49,24 @@ typedef struct {
     uint16_t port;  /* host byte order */
     time_t first;   /* primeiro registro (os mais antigos são os mais estáveis) */
     time_t seen;    /* última renovação */
+    uint32_t obs_ip;    /* endereço externo observado no PUNCH (network byte order), 0 = desconhecido */
+    uint16_t obs_port;  /* porta externa observada no PUNCH, host byte order */
     int used;
 } entry_t;
 
+#define MAX_PROBES 16
+#define LABEL_MAX 32
+#define PROBE_TTL 120
+
+typedef struct {
+    char label[LABEL_MAX];
+    uint32_t ip;    /* network byte order */
+    uint16_t port;  /* porta externa observada, host byte order */
+    time_t seen;
+    int used;
+} probe_t;
+
+static probe_t probes[MAX_PROBES];
 static entry_t table[MAX_ENTRIES];
 static int ttl = 60;
 static int verbose;
@@ -101,6 +122,8 @@ static int upsert(uint32_t ip, uint16_t port, time_t now) {
         e->ip = ip;
         e->port = port;
         e->first = now;
+        e->obs_ip = 0;
+        e->obs_port = 0;
     }
     e->seen = now;
     return 1;
@@ -158,7 +181,7 @@ static int read_line(int fd, char *buf, size_t cap) {
     return n > 0;
 }
 
-static void handle(int fd, uint32_t peer_ip) {
+static void handle(int fd, uint32_t peer_ip, uint16_t peer_port) {
     char line[LINE_MAX_LEN], *cmd, *a1, *a2, *save = NULL;
     time_t now = time(NULL);
     uint16_t port;
@@ -176,10 +199,85 @@ static void handle(int fd, uint32_t peer_ip) {
 
     if (strcmp(cmd, "PING") == 0) {
         put(fd, "PONG\n");
+    } else if (strcmp(cmd, "WHOAMI") == 0) {
+        inet_ntop(AF_INET, &peer_ip, ipstr, sizeof ipstr);
+        put(fd, "OK %s:%u\n", ipstr, peer_port);
+    } else if (strcmp(cmd, "PROBE") == 0) {
+        probe_t *slot = NULL;
+
+        if (!a1 || strlen(a1) >= LABEL_MAX) {
+            put(fd, "ERR rotulo invalido\n");
+            return;
+        }
+        for (int i = 0; i < MAX_PROBES; i++) {
+            if (probes[i].used && now - probes[i].seen > PROBE_TTL)
+                probes[i].used = 0;
+            if (probes[i].used && strcmp(probes[i].label, a1) == 0)
+                slot = &probes[i];
+        }
+        for (int i = 0; i < MAX_PROBES && !slot; i++)
+            if (!probes[i].used)
+                slot = &probes[i];
+        if (!slot) {
+            put(fd, "ERR tabela cheia\n");
+            return;
+        }
+        snprintf(slot->label, sizeof slot->label, "%s", a1);
+        slot->ip = peer_ip;
+        slot->port = peer_port;
+        slot->seen = now;
+        slot->used = 1;
+        inet_ntop(AF_INET, &peer_ip, ipstr, sizeof ipstr);
+        if (verbose)
+            logf_("probe %s = %s:%u", a1, ipstr, peer_port);
+        put(fd, "OK %s:%u\n", ipstr, peer_port);
+        for (int i = 0; i < MAX_PROBES; i++) {
+            if (probes[i].used && &probes[i] != slot) {
+                char other[INET_ADDRSTRLEN];
+
+                inet_ntop(AF_INET, &probes[i].ip, other, sizeof other);
+                put(fd, "PEER %s %s:%u\n", probes[i].label, other, probes[i].port);
+            }
+        }
+        put(fd, "END\n");
     } else if (strcmp(cmd, "LIST") == 0) {
         for (int i = 0; i < MAX_ENTRIES; i++)
             if (table[i].used)
                 put_peer(fd, &table[i]);
+        put(fd, "END\n");
+    } else if (strcmp(cmd, "PUNCH") == 0) {
+        entry_t *me;
+        char obs[INET_ADDRSTRLEN];
+
+        if (!parse_port(a1, &port)) {
+            put(fd, "ERR porta invalida\n");
+            return;
+        }
+        if (a2 && inet_pton(AF_INET, a2, &ip) != 1) {
+            put(fd, "ERR ip invalido\n");
+            return;
+        }
+        if (!upsert(ip, port, now) || !(me = find(ip, port))) {
+            put(fd, "ERR tabela cheia\n");
+            return;
+        }
+        me->obs_ip = peer_ip;
+        me->obs_port = peer_port;
+        inet_ntop(AF_INET, &ip, ipstr, sizeof ipstr);
+        inet_ntop(AF_INET, &peer_ip, obs, sizeof obs);
+        if (verbose)
+            logf_("punch %s:%u externo %s:%u", ipstr, port, obs, peer_port);
+        put(fd, "OK %s:%u %s:%u\n", ipstr, port, obs, peer_port);
+        for (int i = 0; i < MAX_ENTRIES; i++) {
+            const entry_t *e = &table[i];
+            char id[INET_ADDRSTRLEN], ext[INET_ADDRSTRLEN];
+
+            if (!e->used || e == me || e->obs_port == 0)
+                continue;
+            inet_ntop(AF_INET, &e->ip, id, sizeof id);
+            inet_ntop(AF_INET, &e->obs_ip, ext, sizeof ext);
+            put(fd, "NODE %s:%u %s:%u\n", id, e->port, ext, e->obs_port);
+        }
         put(fd, "END\n");
     } else if (strcmp(cmd, "REGISTER") == 0 || strcmp(cmd, "UNREGISTER") == 0) {
         int is_reg = cmd[0] == 'R';
@@ -285,7 +383,7 @@ int main(int argc, char **argv) {
         }
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-        handle(fd, from.sin_addr.s_addr);
+        handle(fd, from.sin_addr.s_addr, ntohs(from.sin_port));
         close(fd);
     }
     close(srv);
