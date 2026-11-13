@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Servidor de rendezvous dos Super Peers: uma instância EC2 com Docker e IP elástico.
+  A imagem vem do ECR (veja deploy.sh). Usa a VPC padrão da região.
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: Imagem no ECR, ex. 123456789012.dkr.ecr.us-east-1.amazonaws.com/bt-rendezvous:latest
+  Port:
+    Type: Number
+    Default: 7000
+    MinValue: 1
+    MaxValue: 65535
+  TtlSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    Description: Tempo até um Super Peer não renovado sair da lista.
+  AllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Quem pode falar com o servidor (restrinja se os Super Peers tiverem IPs conhecidos).
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${AWS::StackName}/rendezvous
+      RetentionInDays: 14
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore        # acesso por Session Manager, sem SSH
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly  # puxar a imagem
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub ${LogGroup.Arn}:*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Rendezvous (TCP); sem SSH, use o Session Manager
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref Port
+          ToPort: !Ref Port
+          CidrIp: !Ref AllowedCidr
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      MetadataOptions:
+        HttpTokens: required
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-rendezvous" }
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y docker
+            systemctl enable --now docker
+
+            # Troca/atualiza o container. Também é usado pelo `deploy.sh update` via SSM.
+            cat >/usr/local/bin/rdv-update.sh <<'SCRIPT'
+            #!/bin/bash
+            set -euo pipefail
+            IMAGE="$1"
+            REGION="${!IMAGE#*.dkr.ecr.}"; REGION="${!REGION%%.*}"
+            aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${!IMAGE%%/*}"
+            docker pull "$IMAGE"
+            docker rm -f rendezvous 2>/dev/null || true
+            # --network host: o servidor precisa enxergar o IP real de cada Super Peer.
+            docker run -d --name rendezvous --restart unless-stopped --network host \
+              -e PORT=${Port} \
+              --log-driver awslogs --log-opt awslogs-region="$REGION" --log-opt awslogs-group=${LogGroup} \
+              "$IMAGE" -t ${TtlSeconds} -v
+            SCRIPT
+            chmod +x /usr/local/bin/rdv-update.sh
+            /usr/local/bin/rdv-update.sh "${ImageUri}"
+          - {}
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref Instance
+
+Outputs:
+  Address:
+    Description: Endereço para colar na configuração do app (host:porta)
+    Value: !Sub ${ElasticIp}:${Port}
+  InstanceId:
+    Value: !Ref Instance
+  LogGroup:
+    Value: !Ref LogGroup

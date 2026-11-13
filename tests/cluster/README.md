@@ -190,3 +190,21 @@ reiniciado (é o `sp5102-rejoin.log` do harness antigo).
 - Um `upload` feito depois de um `kill -9` e antes da detecção da falha (cerca de 15 s) pode ser
   recusado pelo 2PC. Os cenários esperam o `SUSPECT`/`FAILED` antes de enviar.
 - Para ensaiar sem rede, use `host m1 local`: roda no próprio checkout, sem ssh.
+
+## TUI (Textual)
+
+`tests/cluster/tui/run.sh` abre uma interface de terminal sobre o `cluster.sh` (na primeira
+execução cria `tui/.venv` e instala o `textual`; precisa de rede). `F1` e `F2` alternam as visões:
+
+- **Cliente (F1)**: aplicação BitTorrent tradicional. Escolhe-se um cliente (`C1`…) e há
+  upload (seletor dos arquivos de `out/files`), download, busca, guardar valor, ping/join/leave,
+  tabela de transferências, saída do comando, linha de comando livre e métricas do nó
+  (`state`, com atualização automática opcional).
+- **Gerenciamento (F2)**: aba Configuração (edita padrões, máquinas e avulsos do `cluster.conf`;
+  "Salvar" valida com o `cluster.sh list`, guarda `cluster.conf.bak` e só então grava; subir ou
+  fazer deploy com alterações não salvas é bloqueado), abas Cluster (subir/derrubar, deploy, check, net, kill/stop/start/restart),
+  Métricas (overview, membership, Chord, coordenador, LFU, metadata, lookup, eventos),
+  Testes (executa `scenarios/*.sh` e mostra o relatório), Comandos (shell em qualquer máquina
+  via `exec`) e Logs (acompanha o log espelhado de um processo).
+
+Para apontar para outro script (testes), use `CLUSTER_SH=/caminho/cluster.sh`.

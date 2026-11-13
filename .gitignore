@@ -19,6 +19,7 @@ tests/flow/out/
 # Harness distribuído (tests/cluster): topologia local, logs espelhados, saídas e a
 # pasta run/ que o host "local" usa dentro do próprio checkout.
 tests/cluster/cluster.conf
+tests/cluster/cluster.conf.bak
 tests/cluster/logs/
 tests/cluster/out/
 /run/
