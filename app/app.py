@@ -8,6 +8,7 @@ Execução: app/run.sh
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import signal
 import time
@@ -35,6 +36,17 @@ from textual.widgets import (
 
 import node
 import tunnel as tn
+
+
+def download_target(out: str, name: str) -> str:
+    """Destino do download. Vazio, terminado em '/' ou uma pasta existente viram `<pasta>/<nome>`."""
+    out = out.strip() or "downloads/"
+    resolved = Path(out) if os.path.isabs(out) else node.CLIENT_DIR / out
+    if out.endswith("/") or resolved.is_dir():
+        out = out.rstrip("/") + "/" + Path(name).name
+        resolved = Path(out) if os.path.isabs(out) else node.CLIENT_DIR / out
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return out
 
 
 class FormModal(ModalScreen["list[str] | None"]):
@@ -387,7 +399,7 @@ class BitTorrentApp(App):
 
         def done(v: list[str] | None) -> None:
             if v and v[0]:
-                self.run_client("download", v[0], v[1] or f"downloads/{v[0]}")
+                self.run_client("download", v[0], download_target(v[1], v[0]))
 
         self.push_screen(FormModal("Download", [("Nome do arquivo na rede", ""),
                                                 ("Salvar como (relativo a data/client/)", "downloads/")]), done)
