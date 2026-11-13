@@ -96,7 +96,9 @@ sync_code() {
     push_tree "$h" "$PROJECT_ROOT_REAL" "$(host_dir_expr "$h")" \
         ./.git ./.worktrees ./.idea ./bin ./obj ./data ./storage ./tests/data \
         ./docs ./.claude ./.cursor ./.github ./CLAUDE.md ./tests/flow/logs ./tests/flow/out ./tests/cluster/logs ./tests/cluster/out \
-        ./tests/cluster/cluster.conf ./run
+        ./tests/cluster/cluster.conf ./run \
+        ./app/data ./app/.venv ./tests/cluster/tui/.venv ./.cache ./.agent-work \
+        ./tests/c1/logs ./compile_commands.json __pycache__
 }
 
 # Roda uma função para cada host em paralelo; a saída de cada um leva o prefixo [host].
