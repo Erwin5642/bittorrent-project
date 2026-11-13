@@ -6,6 +6,7 @@
 #   unregister <porta> [ip]  remove o registro
 #   list                     lista os Super Peers registrados
 #   ping                     testa o servidor (PONG)
+#   whoami                   o endereço externo (ip:porta) com que o servidor vê esta conexão
 #
 # Saída: a resposta do servidor, linha a linha, sem o "END". Código de saída:
 #   0 ok · 1 o servidor respondeu ERR · 2 erro de uso · 3 sem conexão/timeout
@@ -14,7 +15,7 @@ set -u
 SERVER="${1:-}"
 CMD="${2:-}"
 [[ -n "$SERVER" && -n "$CMD" && "$SERVER" == *:* ]] || {
-    sed -n '2,12p' "$0" >&2
+    sed -n '2,13p' "$0" >&2
     exit 2
 }
 HOST="${SERVER%:*}"
@@ -24,7 +25,7 @@ shift 2
 
 case "$CMD" in
 register | unregister) [[ $# -ge 1 ]] || { echo "falta a porta" >&2; exit 2; }; REQ="${CMD^^} $*" ;;
-list | ping) REQ="${CMD^^}" ;;
+list | ping | whoami) REQ="${CMD^^}" ;;
 *) echo "comando desconhecido: $CMD" >&2; exit 2 ;;
 esac
 

@@ -13,6 +13,9 @@ Texto sobre TCP, **uma conexão = um comando** (porta padrão 7000):
 | `UNREGISTER <porta> [ip]` | `OK` |
 | `LIST` | `PEER <ip>:<porta>` para cada registro, `END` |
 | `PING` | `PONG` |
+| `PUNCH <porta> [ip]` | `OK <ip>:<porta> <ip_ext>:<porta_ext>`, uma linha `NODE <ip>:<porta> <ip_ext>:<porta_ext>` por outro nó, `END`. Como `REGISTER`, e guarda o endereço **externo** da conexão (onde o NAT abriu o mapeamento) para o hole punching do app |
+| `WHOAMI` | `OK <ip>:<porta>`: o endereço externo (com a porta) com que o servidor vê esta conexão |
+| `PROBE <rótulo>` | `OK <ip>:<porta>`, uma linha `PEER <rótulo> <ip>:<porta>` por outro rótulo, `END` (usado pelo `nat-probe.py`) |
 | erro | `ERR <motivo>` |
 
 O IP registrado é o que o servidor enxerga na conexão; a porta é a de escuta do Super Peer,
@@ -44,6 +47,21 @@ docker build -t bt-rendezvous rendezvous/
 docker run --rm --network host bt-rendezvous                 # porta 7000
 docker run --rm -p 7000:7000 bt-rendezvous -t 120 -v         # sem host network
 ```
+
+## Teste de hole punching TCP
+
+`nat-probe.py` diz se duas máquinas atrás de NAT conseguem abrir uma conexão TCP direta (precisa só de
+Python 3). Cada uma roda, ao mesmo tempo e com rótulos diferentes:
+
+```bash
+python3 rendezvous/nat-probe.py <host:porta-do-rendezvous> ana     # numa máquina
+python3 rendezvous/nat-probe.py <host:porta-do-rendezvous> beto    # na outra
+```
+
+Ele escolhe uma porta local P e, sempre a partir dela, descobre o endereço externo que o NAT deu,
+encontra o do outro lado e tenta conectar nele enquanto escuta em P (simultaneous open). Imprime
+`PUNCH OK` se funcionou. Também avisa se o NAT preserva ou remapeia a porta e se a porta externa
+mudou entre consultas.
 
 ## Deploy na AWS
 
