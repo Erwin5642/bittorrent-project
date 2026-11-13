@@ -269,8 +269,16 @@ static int cmd_upload(const char *file, const char *conf, const char *host_opt, 
 		return 1;
 	}
 
+	/* errno zerado antes: se continuar 0 depois, a falha não veio de uma chamada
+	   de sistema (ex.: fragmentação) e não há motivo do SO para mostrar. */
+	errno = 0;
 	if (!upload_prepare(file, STORAGE_ROOT, &self.node_id, &meta)) {
-		fprintf(stderr, "upload: falha ao processar %s\n", file);
+		int err = errno;
+
+		if (err != 0)
+			fprintf(stderr, "upload: falha ao processar %s: %s (errno %d)\n", file, strerror(err), err);
+		else
+			fprintf(stderr, "upload: falha ao processar %s\n", file);
 		return 1;
 	}
 

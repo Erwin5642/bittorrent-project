@@ -18,6 +18,16 @@ CMD="${2:-}"
     sed -n '2,13p' "$0" >&2
     exit 2
 }
+# Vigia: o /dev/tcp do bash não tem prazo de conexão (host fora do ar = ~2 min de espera).
+if [[ -z "${RDV_INNER:-}" ]]; then
+    RDV_INNER=1 timeout "$(( ${RDV_TIMEOUT:-5} + 5 ))" bash "$0" "$@"
+    rc=$?
+    if [[ $rc -eq 124 ]]; then
+        echo "ERR sem resposta de $SERVER (timeout)" >&2
+        exit 3
+    fi
+    exit "$rc"
+fi
 HOST="${SERVER%:*}"
 PORT="${SERVER##*:}"
 TIMEOUT="${RDV_TIMEOUT:-5}"

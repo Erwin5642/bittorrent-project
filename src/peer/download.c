@@ -171,6 +171,34 @@ done:
 	return rc;
 }
 
+/* Progresso compartilhado entre os workers: chunks prontos e último % emitido. */
+typedef struct {
+	pthread_mutex_t lock;
+	const char *name;
+	uint32_t total;
+	uint32_t finished;
+	int last_pct;
+} progress_t;
+
+/* Conta um chunk pronto e emite "Transfer <nome> PROGRESS <feitos> <total>"
+   quando a porcentagem muda (a TUI usa essa linha para a barra de progresso). */
+static void progress_chunk_done(progress_t *p) {
+	int pct;
+
+	if (!p)
+		return;
+	pthread_mutex_lock(&p->lock);
+	p->finished++;
+	pct = (int)((uint64_t)p->finished * 100 / p->total);
+	if (pct != p->last_pct) {
+		p->last_pct = pct;
+		printf("Transfer %s PROGRESS %u %u\n", p->name, (unsigned)p->finished,
+		       (unsigned)p->total);
+		fflush(stdout);
+	}
+	pthread_mutex_unlock(&p->lock);
+}
+
 /* Pede um chunk ao Super Peer, descomprime e confere o hash. */
 typedef struct {
 	const char *host;
@@ -179,6 +207,7 @@ typedef struct {
 	const file_metadata_t *meta;
 	uint8_t *out_buf;
 	uint8_t *done;     /* done[i] = 1 quando o chunk i chegou e conferiu */
+	progress_t *progress;
 	uint32_t start;
 	uint32_t workers;
 	int ok;
@@ -262,6 +291,7 @@ static void *fetch_worker(void *arg) {
 			return NULL;
 		}
 		t->done[i] = 1;
+		progress_chunk_done(t->progress);
 	}
 	t->ok = 1;
 	return NULL;
@@ -269,7 +299,8 @@ static void *fetch_worker(void *arg) {
 
 /* Busca numa réplica os chunks com done[i] == 0. 1 se todos ficaram prontos. */
 static int fetch_chunks(const char *host, uint16_t port, const node_id_t *self,
-                        const file_metadata_t *meta, uint8_t *out_buf, uint8_t *done) {
+                        const file_metadata_t *meta, uint8_t *out_buf, uint8_t *done,
+                        progress_t *progress) {
 	pthread_t th[TRANSFER_WORKERS];
 	fetch_task_t task[TRANSFER_WORKERS];
 	uint32_t nw;
@@ -279,7 +310,7 @@ static int fetch_chunks(const char *host, uint16_t port, const node_id_t *self,
 
 	nw = meta->chunk_count < TRANSFER_WORKERS ? meta->chunk_count : TRANSFER_WORKERS;
 	for (w = 0; w < nw; w++) {
-		task[w] = (fetch_task_t){host, port, self, meta, out_buf, done, w, nw, 0};
+		task[w] = (fetch_task_t){host, port, self, meta, out_buf, done, progress, w, nw, 0};
 		if (pthread_create(&th[w], NULL, fetch_worker, &task[w]) != 0) {
 			all_ok = 0;
 			break;
@@ -353,6 +384,7 @@ int download_from_superpeer(const char *host, uint16_t port, const node_id_t *se
 	uint8_t *out_buf = NULL;
 	uint8_t *done = NULL;
 	uint8_t digest[NODE_ID_SIZE];
+	progress_t progress;
 	int rc = 0;
 
 	if (!host || !self || !name || !output || port == 0)
@@ -389,10 +421,17 @@ int download_from_superpeer(const char *host, uint16_t port, const node_id_t *se
 	if (!out_buf || !done)
 		goto done;
 
+	pthread_mutex_init(&progress.lock, NULL);
+	progress.name = name;
+	progress.total = meta.chunk_count;
+	progress.finished = 0;
+	progress.last_pct = -1;
+
 	transfer_state(name, "STARTED");
 	transfer_state(name, "TRANSFERRING");
 	for (h = 0; h < holder_count && !all_done(done, meta.chunk_count); h++) {
-		if (fetch_chunks(holders[h].host, holders[h].port, self, &meta, out_buf, done))
+		if (fetch_chunks(holders[h].host, holders[h].port, self, &meta, out_buf, done,
+		                 &progress))
 			break;
 		if (!all_done(done, meta.chunk_count) && h + 1 < holder_count) {
 			printf("Transfer %s replica %s:%u sem resposta; seguindo para %s:%u\n", name,

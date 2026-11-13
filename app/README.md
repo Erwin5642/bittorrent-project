@@ -38,8 +38,12 @@ mesma porta); o app precisa estar aberto nas duas pontas.
 
 ## Abas
 
-- **Cliente**: upload (seletor de arquivos), download (para `app/data/client/downloads/`),
+- **Cliente**: upload de arquivo ou de **pasta** (seletor de arquivos e pastas; uma pasta é compactada em
+  `<pasta>.zip` em `app/data/client/uploads/`, enviada como um arquivo comum e o zip temporário é apagado;
+  links simbólicos e arquivos ilegíveis são pulados e listados no painel "Saída"), download (para `app/data/client/downloads/`),
   busca, guardar valor, linha de comando livre, tabela de operações e métricas do nó (`state`).
+  No download, a coluna de estado mostra uma barra de progresso (`████░░░░ 40%`), alimentada pelas
+  linhas `Transfer <nome> PROGRESS <chunks feitos> <total>` que o cliente emite a cada 1% de chunks.
 - **Super Peer**: estado ao vivo, log com filtro, reiniciar/parar/iniciar, re-registrar e listar
   os Super Peers do rendezvous. Só mostra o Super Peer desta máquina.
 - **Configuração**: endereço do rendezvous, portas (Super Peer, cliente e túnel), IP anunciado, testar o servidor e reiniciar o nó.
