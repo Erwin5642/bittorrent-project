@@ -14,8 +14,7 @@
 O item 10 (*CHECKPOINT 6*) da especificação pede que o Aluno 1 demonstre
 `upload`, `download`, `chunks`, `compression`, `cache` e `replica`, e que o
 Aluno 2 demonstre `Chord`, `Gossip`, `Bully`, `SMR`, `2PC` e `IST`. Os dois
-podem demonstrar juntos integração, debugging, documentação e testes. O
-professor fornecerá um conjunto de testes para o sistema.
+podem demonstrar juntos integração, debugging, documentação e testes.
 
 Diferente dos checkpoints 2 a 5, este quase não mexeu nos protocolos nem nos
 algoritmos. O código dos Super Peers ficou como estava no checkpoint 5. A
@@ -60,7 +59,7 @@ uso, em `tests/cluster/README.md`.
   `remote.sh` (ciclo de vida do processo na máquina remota), `node.sh` e
   `client.sh` (Super Peers e clientes persistentes), `steps.sh` e `asserts.sh`
   (passos e conferências dos cenários) e `inspect.sh` (inspeção).
-- `scenarios/`: `smoke.sh`, `final.sh`, `carga.sh` e `professor.sh`.
+- `scenarios/`: `smoke.sh`, `final.sh` e `carga.sh`.
 - `watch.sh` (painéis em tmux) e `tui/` (interface Textual com visão de cliente
   e de gerenciamento do `cluster.conf`).
 
@@ -149,9 +148,8 @@ um deles ao vivo na demonstração.
 | Cenário | O que faz |
 | --- | --- |
 | `smoke` | Sobe tudo, um upload, um download em outra máquina, confere o `LogIndex` |
-| `final` | Roteiro do CP6, uma fase por item da lista do professor |
+| `final` | Roteiro do CP6, uma fase por item das listas dos dois alunos |
 | `carga` | Todos os clientes ao mesmo tempo, cada um envia um arquivo e baixa o do seguinte (`WAVE=<n>` limita quantos agem por vez) |
-| `professor` | Encaixe para o conjunto de testes que o professor fornecer |
 
 Ao terminar, `run.sh` grava `tests/cluster/out/relatorio.md` (fases, métricas de
 tempo e caminho dos logs) e derruba o cluster (`CLUSTER_KEEP=1` mantém).
@@ -291,17 +289,14 @@ checkpoint é o cenário `final` do harness distribuído (seção 4).
 
 ## 7. Pendências e riscos
 
-- **Conjunto de testes do professor.** Ainda não recebido. O cenário
-  `professor` é o encaixe: basta o professor entregar os comandos e as
-  conferências para ligar em `tests/cluster/scenarios/professor.sh`.
-- **Máquinas reais.** Os ensaios com duas máquinas foram feitos com "máquinas"
-  simuladas (dois diretórios e dois IPs de loopback acessados por ssh). O
-  relatório de 13/11 não distingue se os 5 hosts eram máquinas físicas; a
-  execução em máquinas de laboratório precisa ser confirmada e registrada antes
-  da apresentação.
-- **Hole punching.** O túnel foi desenvolvido com o `nat-probe.py` e o
-  rendezvous, mas depende do tipo de NAT de cada rede. Convém rodar o
-  `nat-probe.py` nas redes da demonstração e ter VPN ou rede local como plano B.
+- **Alcance dos ensaios.** O cluster foi executado em máquinas reais de três
+  sub-redes de laboratório diferentes, e o app foi testado com máquinas em
+  países diferentes, atrás de NAT. Em todos os ensaios deste checkpoint cada
+  `host` do `cluster.conf` é uma máquina real; as máquinas simuladas ficaram nos
+  checkpoints anteriores.
+- **Hole punching.** O túnel depende do tipo de NAT de cada rede, e NAT simétrico
+  o impede (seção 5). Em redes novas, convém rodar o `nat-probe.py` antes e ter
+  VPN ou rede local como plano B.
 - **Limites herdados do CP5.** O operation log em memória, com teto de 256
   entradas, limita o que o IST reconstrói, e o envio de chunks no upload ainda
   não tem prazo.
@@ -329,6 +324,6 @@ O checkpoint 6 não muda os algoritmos: entrega o que faltava para demonstrá-lo
 e testá-los em conjunto. O harness distribuído roda o roteiro completo, com um
 passo para cada item das listas dos dois alunos, em várias máquinas, com falhas
 injetadas e métricas de tempo medidas num relógio único. O app com rendezvous
-permite formar a rede entre máquinas atrás de NAT sem tocar nos Super Peers. As
-pendências são a execução do conjunto de testes do professor e a confirmação do
-ensaio em máquinas reais.
+permite formar a rede entre máquinas atrás de NAT sem tocar nos Super Peers.
+Cluster e app foram exercitados em máquinas reais, em sub-redes e países
+diferentes.
